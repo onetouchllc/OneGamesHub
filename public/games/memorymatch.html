@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Memory Match</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>
+  body { overflow: auto; }
+  .game-wrap { height: auto; min-height: 100vh; justify-content: flex-start; padding: 12px; gap: 12px; }
+  .memory-grid {
+    display: grid;
+    grid-template-columns: repeat(4,1fr);
+    gap: 10px;
+    max-width: 440px;
+    width: 100%;
+  }
+  .mem-card {
+    aspect-ratio: 1;
+    border-radius: 10px;
+    cursor: pointer;
+    perspective: 600px;
+    position: relative;
+  }
+  .card-inner {
+    width: 100%; height: 100%;
+    position: relative;
+    transform-style: preserve-3d;
+    transition: transform 0.4s cubic-bezier(.4,0,.2,1);
+    border-radius: 10px;
+  }
+  .card-inner.flipped { transform: rotateY(180deg); }
+  .card-front, .card-back {
+    position: absolute; inset: 0;
+    border-radius: 10px;
+    backface-visibility: hidden;
+    display: flex; align-items: center; justify-content: center;
+    font-size: clamp(24px, 6vw, 38px);
+  }
+  .card-back {
+    background: #0d1428;
+    border: 2px solid rgba(0,200,255,0.2);
+    transform: rotateY(180deg);
+  }
+  .card-front {
+    background: linear-gradient(135deg,#111827,#1a2035);
+    border: 2px solid rgba(0,200,255,0.1);
+    font-size: 28px;
+    color: var(--muted);
+  }
+  .card-front::after { content: '?'; }
+  .mem-card.matched .card-inner { animation: matchPulse 0.4s ease; }
+  .mem-card.matched .card-back {
+    border-color: var(--green);
+    background: rgba(0,255,136,0.12);
+  }
+  @keyframes matchPulse {
+    0%,100% { transform: rotateY(180deg) scale(1); }
+    50% { transform: rotateY(180deg) scale(1.08); }
+  }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WIN!</div>
+    <div class="banner-sub" id="result-sub">—</div>
+    <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+  </div>
+  <div class="hud">
+    <div class="hud-title">MEMORY MATCH</div>
+    <div class="hud-status" id="turn-label">—</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-1">P1: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-2">P2: 0</span>
+    </div>
+  </div>
+  <div class="memory-grid" id="grid"></div>
+  <button class="btn btn-ghost" id="reset-btn">↺ RESET</button>
+  <div class="game-toast" id="gtoast"></div>
+</div>
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const ICONS=['🦊','🐯','🦁','🐸','🦋','🐙','🦄','🦀'];
+let cards=[], flipped=[], matched=[], lockBoard=false;
+let turn=1, scores=[0,0];
+let isMulti=!IS_SOLO, gameReady=!isMulti;
+let myTeam=PLAYER===0?1:(PLAYER===1?2:1);
+
+if(isMulti&&PLAYER===0){
+  document.getElementById('waiting-screen').style.display='flex';
+  document.getElementById('room-code-disp').textContent=ROOM||'----';
+}
+onRoomReady(()=>{
+  document.getElementById('waiting-screen').style.display='none';
+  gameReady=true;
+  showToast(myTeam===1?'YOU ARE P1':'YOU ARE P2');
+  updateLabel();
+});
+onPlayerLeft(()=>showToast('OPPONENT LEFT'));
+
+function shuffle(arr){ return [...arr].sort(()=>Math.random()-0.5); }
+
+function buildGrid(seed){
+  const grid=document.getElementById('grid');
+  grid.innerHTML='';
+  const pairs=[...ICONS,...ICONS];
+  // Use same seed for both players in multiplayer
+  if(seed){ cards=seededShuffle(pairs,seed); } else { cards=shuffle(pairs); }
+  flipped=[]; matched=[];
+  cards.forEach((icon,i)=>{
+    const card=document.createElement('div');
+    card.className='mem-card';
+    card.innerHTML=`<div class="card-inner"><div class="card-front"></div><div class="card-back">${icon}</div></div>`;
+    card.addEventListener('click',()=>onCardClick(i));
+    grid.appendChild(card);
+  });
+}
+
+function seededShuffle(arr,seed){
+  const a=[...arr]; let s=seed;
+  for(let i=a.length-1;i>0;i--){
+    s=(s*9301+49297)%233280;
+    const j=Math.floor(s/233280*(i+1));
+    [a[i],a[j]]=[a[j],a[i]];
+  }
+  return a;
+}
+
+let gameSeed=Math.floor(Math.random()*1000000);
+
+function onCardClick(idx){
+  if(!gameReady||lockBoard) return;
+  if(isMulti&&turn!==myTeam) return;
+  if(flipped.includes(idx)||matched.includes(idx)) return;
+  if(isMulti){
+    socketEmit('game:action',{type:'mem:flip',idx});
+  } else {
+    doFlip(idx,turn);
+  }
+}
+
+function doFlip(idx,player){
+  flipCard(idx,true);
+  flipped.push(idx);
+  if(flipped.length===2){
+    lockBoard=true;
+    setTimeout(()=>checkMatch(player),800);
+  }
+}
+
+function flipCard(idx,show){
+  const card=document.getElementById('grid').children[idx];
+  if(!card) return;
+  const inner=card.querySelector('.card-inner');
+  if(show) inner.classList.add('flipped');
+  else inner.classList.remove('flipped');
+}
+
+function checkMatch(player){
+  const [a,b]=flipped;
+  if(cards[a]===cards[b]){
+    matched.push(a,b);
+    scores[player-1]++;
+    updateScores();
+    document.getElementById('grid').children[a].classList.add('matched');
+    document.getElementById('grid').children[b].classList.add('matched');
+    showToast(isMulti?(player===myTeam?'✅ MATCH! YOUR TURN AGAIN':'✅ OPPONENT MATCHED'):'✅ MATCH!');
+    if(matched.length===cards.length){
+      lockBoard=true;
+      setTimeout(showResult,500);
+      return;
+    }
+    // Same player continues
+  } else {
+    flipCard(a,false); flipCard(b,false);
+    turn=turn===1?2:1;
+    if(!isMulti&&turn===2) setTimeout(aiFlip,600);
+  }
+  flipped=[];
+  lockBoard=false;
+  updateLabel();
+}
+
+let aiMemory={};
+function aiFlip(){
+  if(turn!==2||matched.length===cards.length) return;
+  const avail=cards.map((_,i)=>i).filter(i=>!matched.includes(i)&&!flipped.includes(i));
+  // Try to find a known pair
+  let pick1=null,pick2=null;
+  for(const [icon,idxs] of Object.entries(aiMemory)){
+    const unmatched=idxs.filter(i=>!matched.includes(i));
+    if(unmatched.length>=2){ pick1=unmatched[0]; pick2=unmatched[1]; break; }
+  }
+  if(!pick1){ pick1=avail[Math.floor(Math.random()*avail.length)]; }
+  if(!pick2){
+    const icon=cards[pick1];
+    const known=(aiMemory[icon]||[]).find(i=>i!==pick1&&!matched.includes(i));
+    pick2=known||avail.filter(i=>i!==pick1)[Math.floor(Math.random()*(avail.length-1))];
+  }
+  // Record
+  [pick1,pick2].forEach(i=>{
+    const ic=cards[i];
+    if(!aiMemory[ic]) aiMemory[ic]=[];
+    if(!aiMemory[ic].includes(i)) aiMemory[ic].push(i);
+  });
+  setTimeout(()=>{ doFlip(pick1,2); setTimeout(()=>{ if(flipped.length===1) doFlip(pick2,2); },500); },400);
+}
+
+socketOn('game:action',data=>{
+  if(data.type==='mem:flip'){
+    if(data.playerIndex!==PLAYER) return;
+    doFlip(data.idx,turn);
+  }
+  if(data.type==='mem:reset') buildAndBroadcast();
+});
+
+function buildAndBroadcast(){
+  scores=[0,0]; turn=1; lockBoard=false; gameOver=false;
+  if(isMulti){
+    if(PLAYER===0){
+      gameSeed=Math.floor(Math.random()*1000000);
+      socketEmit('game:action',{type:'mem:seed',seed:gameSeed});
+    }
+  }
+  buildGrid(gameSeed);
+  document.getElementById('result-banner').style.display='none';
+  lockBoard=false;
+  updateScores(); updateLabel();
+}
+
+socketOn('game:action',data=>{
+  if(data.type==='mem:seed'&&data.playerIndex!==PLAYER){
+    gameSeed=data.seed;
+    buildGrid(gameSeed);
+    updateLabel();
+  }
+});
+
+function showResult(){
+  const s1=scores[0],s2=scores[1];
+  const winner=s1>s2?1:s2>s1?2:0;
+  const text=document.getElementById('result-text');
+  const sub=document.getElementById('result-sub');
+  if(!winner){ text.textContent="DRAW!"; sub.textContent=`${s1} — ${s2}`; }
+  else if(isMulti){ text.textContent=winner===myTeam?'🏆 YOU WIN!':'💀 YOU LOSE'; sub.textContent=`${s1} — ${s2}`; }
+  else { text.textContent=`PLAYER ${winner} WINS!`; sub.textContent=`${s1} — ${s2}`; }
+  document.getElementById('result-banner').style.display='flex';
+}
+
+function updateLabel(){
+  const lbl=document.getElementById('turn-label');
+  if(!gameReady){ lbl.textContent='WAITING…'; return; }
+  if(isMulti) lbl.textContent=turn===myTeam?'🟢 YOUR TURN':'⏳ OPPONENT';
+  else lbl.textContent=`PLAYER ${turn}'S TURN`;
+}
+function updateScores(){
+  document.getElementById('score-1').textContent=`P1: ${scores[0]}`;
+  document.getElementById('score-2').textContent=`P2: ${scores[1]}`;
+}
+
+document.getElementById('reset-btn').addEventListener('click',()=>{
+  if(isMulti) socketEmit('game:action',{type:'mem:reset'}); else buildAndBroadcast();
+});
+document.getElementById('play-again-btn').addEventListener('click',()=>{
+  if(isMulti) socketEmit('game:action',{type:'mem:reset'}); else buildAndBroadcast();
+});
+
+function showToast(msg){ const t=document.getElementById('gtoast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
+
+buildAndBroadcast();
+</script>
+</body>
+</html>

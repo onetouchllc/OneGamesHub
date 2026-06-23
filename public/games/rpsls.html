@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RPSLS</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>
+  body { overflow: auto; }
+  .game-wrap { justify-content: flex-start; padding-top: 20px; gap: 12px; overflow: auto; height: auto; min-height: 100vh; }
+  .choices { display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
+  .choice-btn {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    background: var(--card); border: 2px solid var(--border);
+    border-radius: 16px; padding: 20px 18px; cursor: pointer;
+    transition: all 0.2s; font-family: 'Baloo 2',sans-serif;
+    min-width: 100px;
+  }
+  .choice-btn:hover { border-color: var(--cyan); transform: translateY(-4px); box-shadow: 0 12px 30px rgba(0,200,255,0.2); }
+  .choice-btn.selected { border-color: var(--cyan); background: rgba(0,200,255,0.1); }
+  .choice-btn.opponent-pick { border-color: var(--orange); background: rgba(255,107,43,0.1); }
+  .choice-emoji { font-size: 44px; }
+  .choice-label { font-size: 10px; letter-spacing: 0.15em; color: var(--muted); }
+  .round-display {
+    display: flex; align-items: center; justify-content: center; gap: 40px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 20px 40px; min-width: 320px;
+  }
+  .round-pick { text-align: center; }
+  .round-pick .emoji { font-size: 64px; }
+  .round-pick .label { font-size: 11px; letter-spacing: 0.2em; color: var(--muted); margin-top: 4px; }
+  .round-vs { font-family: 'Baloo 2',sans-serif; font-size: 24px; color: var(--muted); }
+  .round-result {
+    font-family: 'Baloo 2',sans-serif; font-size: 20px; font-weight: 800;
+    text-align: center; padding: 12px 30px; border-radius: 10px;
+    min-width: 240px;
+  }
+  .round-result.win { color: var(--green); background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3); }
+  .round-result.lose { color: var(--orange); background: rgba(255,107,43,0.1); border: 1px solid rgba(255,107,43,0.3); }
+  .round-result.draw { color: var(--gold); background: rgba(255,215,0,0.1); border: 1px solid rgba(255,215,0,0.3); }
+  .rules-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 6px; max-width: 500px; }
+  .rule-item { font-size: 11px; color: var(--muted); text-align: center; padding: 4px; letter-spacing: 0.05em; }
+  .waiting-inline { color: var(--gold); font-family: 'Baloo 2',sans-serif; font-size: 13px; letter-spacing: 0.15em; }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+
+  <div class="hud">
+    <div class="hud-title">RPSLS</div>
+    <div class="hud-status" id="status-lbl">CHOOSE YOUR WEAPON</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-you">YOU: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-opp">OPP: 0</span>
+    </div>
+  </div>
+
+  <div class="choices" id="choices">
+    <div class="choice-btn" data-choice="rock">    <div class="choice-emoji">✊</div><div class="choice-label">ROCK</div></div>
+    <div class="choice-btn" data-choice="paper">   <div class="choice-emoji">✋</div><div class="choice-label">PAPER</div></div>
+    <div class="choice-btn" data-choice="scissors"><div class="choice-emoji">✌️</div><div class="choice-label">SCISSORS</div></div>
+    <div class="choice-btn" data-choice="lizard">  <div class="choice-emoji">🦎</div><div class="choice-label">LIZARD</div></div>
+    <div class="choice-btn" data-choice="spock">   <div class="choice-emoji">🖖</div><div class="choice-label">SPOCK</div></div>
+  </div>
+
+  <div class="round-display" id="round-display" style="display:none">
+    <div class="round-pick"><div class="emoji" id="my-emoji">❓</div><div class="label">YOU</div></div>
+    <div class="round-vs">VS</div>
+    <div class="round-pick"><div class="emoji" id="opp-emoji">❓</div><div class="label">OPPONENT</div></div>
+  </div>
+
+  <div class="round-result" id="round-result" style="display:none"></div>
+
+  <div class="rules-grid">
+    <div class="rule-item">✊ crushes ✌️🦎</div>
+    <div class="rule-item">✋ covers ✊🖖</div>
+    <div class="rule-item">✌️ cuts ✋🦎</div>
+    <div class="rule-item">🦎 eats ✋🖖</div>
+    <div class="rule-item">🖖 smashes ✊✌️</div>
+  </div>
+
+  <div class="game-toast" id="gtoast"></div>
+</div>
+
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const EMOJIS = { rock:'✊', paper:'✋', scissors:'✌️', lizard:'🦎', spock:'🖖' };
+const BEATS = {
+  rock:     ['scissors','lizard'],
+  paper:    ['rock','spock'],
+  scissors: ['paper','lizard'],
+  lizard:   ['paper','spock'],
+  spock:    ['rock','scissors']
+};
+
+let isMulti = !IS_SOLO;
+let gameReady = !isMulti || PLAYER === 1; // joiner is always ready
+let myChoice = null;
+let oppChoice = null;
+let scores = [0, 0];
+let waiting = false;
+
+if (isMulti && PLAYER === 0) {
+  document.getElementById('waiting-screen').style.display = 'flex';
+  document.getElementById('room-code-disp').textContent = ROOM || '----';
+}
+onRoomReady(() => {
+  document.getElementById('waiting-screen').style.display = 'none';
+  gameReady = true;
+  showToast('OPPONENT JOINED!');
+});
+onPlayerLeft(() => showToast('OPPONENT LEFT'));
+
+document.querySelectorAll('.choice-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (!gameReady || waiting) return;
+    const choice = btn.dataset.choice;
+    myChoice = choice;
+    document.querySelectorAll('.choice-btn').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+
+    if (isMulti) {
+      waiting = true;
+      document.getElementById('status-lbl').textContent = '⏳ WAITING FOR OPPONENT…';
+      socketEmit('game:action', { type: 'rpsls:choice', choice });
+    } else {
+      oppChoice = randomChoice();
+      resolve(myChoice, oppChoice);
+    }
+  });
+});
+
+function randomChoice() {
+  const choices = Object.keys(EMOJIS);
+  return choices[Math.floor(Math.random() * choices.length)];
+}
+
+function resolve(mine, theirs) {
+  document.getElementById('round-display').style.display = 'flex';
+  document.getElementById('my-emoji').textContent = EMOJIS[mine];
+  document.getElementById('opp-emoji').textContent = EMOJIS[theirs];
+
+  let result, msg;
+  if (mine === theirs) { result = 'draw'; msg = "IT'S A DRAW!"; }
+  else if (BEATS[mine].includes(theirs)) { result = 'win'; msg = '🏆 YOU WIN!'; scores[0]++; }
+  else { result = 'lose'; msg = '💀 YOU LOSE'; scores[1]++; }
+
+  const rd = document.getElementById('round-result');
+  rd.style.display = 'block';
+  rd.className = `round-result ${result}`;
+  rd.textContent = msg;
+  updateScores();
+
+  waiting = false;
+  myChoice = null; oppChoice = null; oppPicked = null;
+  document.getElementById('status-lbl').textContent = 'CHOOSE YOUR WEAPON';
+  setTimeout(() => {
+    document.querySelectorAll('.choice-btn').forEach(b => b.classList.remove('selected','opponent-pick'));
+    document.getElementById('round-display').style.display = 'none';
+    rd.style.display = 'none';
+  }, 2200);
+}
+
+// Multiplayer: use game:action for both choices
+let oppPicked = null;
+socketOn('game:action', data => {
+  if (data.type !== 'rpsls:choice') return;
+  // the opponent picked
+  if (data.playerIndex !== PLAYER) {
+    oppPicked = data.choice;
+    if (myChoice) {
+      resolve(myChoice, oppPicked);
+      oppPicked = null;
+    }
+  }
+});
+
+function updateScores() {
+  document.getElementById('score-you').textContent = `YOU: ${scores[0]}`;
+  document.getElementById('score-opp').textContent = `OPP: ${scores[1]}`;
+}
+
+function showToast(msg) {
+  const t = document.getElementById('gtoast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Battleship</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>
+  body { overflow: auto; }
+  .game-wrap { height: auto; min-height: 100vh; justify-content: flex-start; padding: 12px 16px 30px; gap: 10px; overflow: auto; }
+  .boards-row { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+  .board-section { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .board-label { font-family: 'Baloo 2',sans-serif; font-size: 11px; letter-spacing: 0.2em; color: var(--muted); }
+  canvas { cursor: pointer; border-radius: 8px; border: 1px solid var(--border); }
+  .ship-bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }
+  .ship-item { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); font-size: 11px; letter-spacing: 0.1em; font-family:'Baloo 2',sans-serif; cursor: pointer; transition: all 0.2s; }
+  .ship-item.active { border-color: var(--cyan); color: var(--cyan); background: rgba(0,200,255,0.1); }
+  .ship-item.placed { border-color: var(--green); color: var(--green); opacity: 0.6; cursor: default; }
+  .orient-btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); font-family:'Baloo 2',sans-serif; font-size: 11px; cursor: pointer; letter-spacing: 0.1em; }
+  .orient-btn:hover { border-color: var(--orange); color: var(--orange); }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WIN!</div>
+    <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+  </div>
+
+  <div class="hud">
+    <div class="hud-title">BATTLESHIP</div>
+    <div class="hud-status" id="status-lbl">PLACE YOUR SHIPS</div>
+    <div class="hud-score">
+      <span class="score-p1" id="hits-you">HIT: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="hits-opp">OPP: 0</span>
+    </div>
+  </div>
+
+  <div id="placement-ui">
+    <div class="ship-bar" id="ship-bar"></div>
+    <div style="display:flex;gap:10px;justify-content:center;margin-top:6px">
+      <button class="orient-btn" id="rotate-btn">↻ ROTATE</button>
+      <button class="btn btn-cyan" id="ready-btn" style="display:none">✓ READY!</button>
+      <button class="btn btn-ghost" id="random-btn">🎲 RANDOM</button>
+    </div>
+  </div>
+
+  <div class="boards-row">
+    <div class="board-section">
+      <div class="board-label">YOUR FLEET</div>
+      <canvas id="myCanvas"></canvas>
+    </div>
+    <div class="board-section">
+      <div class="board-label">ENEMY WATERS</div>
+      <canvas id="enemyCanvas"></canvas>
+    </div>
+  </div>
+  <div class="game-toast" id="gtoast"></div>
+</div>
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const GRID=10, CELL=Math.min(38, Math.floor((window.innerWidth/2-40)/GRID));
+const W=GRID*CELL, H=GRID*CELL;
+const myCanvas=document.getElementById('myCanvas');
+const enemyCanvas=document.getElementById('enemyCanvas');
+const myCtx=myCanvas.getContext('2d');
+const enemyCtx=enemyCanvas.getContext('2d');
+myCanvas.width=enemyCanvas.width=W;
+myCanvas.height=enemyCanvas.height=H;
+
+const SHIPS=[{name:'CARRIER',size:5},{name:'BATTLESHIP',size:4},{name:'CRUISER',size:3},{name:'SUBMARINE',size:3},{name:'DESTROYER',size:2}];
+let myGrid=Array(100).fill(0);   // 0=empty,1=ship
+let myHits=Array(100).fill(0);   // 0=unknown,1=miss,2=hit
+let enemyGuesses=Array(100).fill(0);
+let myShips=[];   // placed ships: [{cells:[...]}]
+let placedShips=[];
+let selectedShip=null;
+let orientation='h';
+let hoverCells=[];
+let phase='place'; // place | wait | battle
+let myTurn=true;
+let isMulti=!IS_SOLO;
+let gameReady=!isMulti || PLAYER === 1; // joiner is always ready
+let myHitCount=0, oppHitCount=0;
+
+if(isMulti&&PLAYER===0){
+  document.getElementById('waiting-screen').style.display='flex';
+  document.getElementById('room-code-disp').textContent=ROOM||'----';
+}
+onRoomReady(()=>{
+  document.getElementById('waiting-screen').style.display='none';
+  gameReady=true;
+  showToast('OPPONENT JOINED! PLACE YOUR SHIPS.');
+});
+onPlayerLeft(()=>showToast('OPPONENT LEFT'));
+
+// Build ship bar
+const shipBar=document.getElementById('ship-bar');
+SHIPS.forEach((s,i)=>{
+  const el=document.createElement('div');
+  el.className='ship-item'; el.dataset.idx=i;
+  el.textContent=`${s.name} (${s.size})`;
+  el.addEventListener('click',()=>{
+    if(placedShips.includes(i)) return;
+    selectedShip=i;
+    document.querySelectorAll('.ship-item').forEach(e=>e.classList.remove('active'));
+    el.classList.add('active');
+  });
+  shipBar.appendChild(el);
+});
+
+document.getElementById('rotate-btn').addEventListener('click',()=>{
+  orientation=orientation==='h'?'v':'h';
+  document.getElementById('rotate-btn').textContent=orientation==='h'?'↻ ROTATE (H)':'↻ ROTATE (V)';
+});
+
+document.getElementById('random-btn').addEventListener('click',()=>{
+  randomPlacement();
+});
+
+function shipCells(r,c,size,dir){
+  const cells=[];
+  for(let i=0;i<size;i++) cells.push(dir==='h'?r*GRID+c+i:(r+i)*GRID+c);
+  return cells;
+}
+
+function validPlacement(cells){
+  for(const cell of cells){
+    if(cell<0||cell>=100) return false;
+    const r=Math.floor(cell/GRID), c=cell%GRID;
+    if(c<0||c>=GRID) return false;
+    if(myGrid[cell]===1) return false;
+  }
+  return true;
+}
+
+myCanvas.addEventListener('mousemove',e=>{
+  if(phase!=='place'||selectedShip===null) return;
+  const rect=myCanvas.getBoundingClientRect();
+  const c=Math.floor((e.clientX-rect.left)/(rect.width/GRID));
+  const r=Math.floor((e.clientY-rect.top)/(rect.height/GRID));
+  const size=SHIPS[selectedShip].size;
+  hoverCells=shipCells(r,c,size,orientation);
+  drawMyBoard();
+});
+myCanvas.addEventListener('mouseleave',()=>{ hoverCells=[]; drawMyBoard(); });
+
+myCanvas.addEventListener('click',e=>{
+  if(phase!=='place'||selectedShip===null) return;
+  const rect=myCanvas.getBoundingClientRect();
+  const c=Math.floor((e.clientX-rect.left)/(rect.width/GRID));
+  const r=Math.floor((e.clientY-rect.top)/(rect.height/GRID));
+  const size=SHIPS[selectedShip].size;
+  const cells=shipCells(r,c,size,orientation);
+  // Validate bounds
+  const valid=cells.every(cell=>{
+    const cr=Math.floor(cell/GRID),cc=cell%GRID;
+    return cr>=0&&cr<GRID&&cc>=0&&cc<GRID&&!myGrid[cell];
+  });
+  if(!valid){ showToast('INVALID POSITION'); return; }
+  cells.forEach(cell=>myGrid[cell]=1);
+  myShips.push({cells,size:SHIPS[selectedShip].size});
+  placedShips.push(selectedShip);
+  document.querySelectorAll('.ship-item')[selectedShip].className='ship-item placed';
+  selectedShip=null;
+  hoverCells=[];
+  if(placedShips.length===SHIPS.length){
+    document.getElementById('ready-btn').style.display='inline-block';
+  }
+  drawMyBoard();
+});
+
+document.getElementById('ready-btn').addEventListener('click',()=>{
+  if(isMulti){
+    socketEmit('game:action',{type:'bs:ready', ships:myShips});
+    document.getElementById('placement-ui').style.display='none';
+    document.getElementById('status-lbl').textContent='⏳ WAITING FOR OPPONENT TO READY…';
+    phase='wait';
+  } else {
+    // Solo: generate AI fleet
+    placeAIShips();
+    phase='battle';
+    myTurn=true;
+    document.getElementById('placement-ui').style.display='none';
+    document.getElementById('status-lbl').textContent='YOUR TURN — CLICK ENEMY WATERS';
+  }
+});
+
+function placeAIShips(){
+  enemyGuesses=Array(100).fill(0);
+  // Place randomly
+  const aiGrid=Array(100).fill(0);
+  SHIPS.forEach(s=>{
+    let placed=false;
+    while(!placed){
+      const dir=Math.random()<0.5?'h':'v';
+      const r=Math.floor(Math.random()*GRID);
+      const c=Math.floor(Math.random()*GRID);
+      const cells=shipCells(r,c,s.size,dir);
+      const valid=cells.every(cell=>{
+        const cr=Math.floor(cell/GRID),cc=cell%GRID;
+        return cr>=0&&cr<GRID&&cc>=0&&cc<GRID&&!aiGrid[cell];
+      });
+      if(valid){ cells.forEach(cell=>aiGrid[cell]=1); placed=true; }
+    }
+  });
+  // Store as "enemy fleet" — in solo mode we just track aiGrid
+  enemyCanvas._aiGrid=aiGrid;
+}
+
+function randomPlacement(){
+  myGrid=Array(100).fill(0); myShips=[]; placedShips=[];
+  document.querySelectorAll('.ship-item').forEach(e=>e.className='ship-item');
+  SHIPS.forEach((s,i)=>{
+    let placed=false;
+    while(!placed){
+      const dir=Math.random()<0.5?'h':'v';
+      const r=Math.floor(Math.random()*GRID);
+      const c=Math.floor(Math.random()*GRID);
+      const cells=shipCells(r,c,s.size,dir);
+      const valid=cells.every(cell=>{
+        const cr=Math.floor(cell/GRID),cc=cell%GRID;
+        return cr>=0&&cr<GRID&&cc>=0&&cc<GRID&&!myGrid[cell];
+      });
+      if(valid){
+        cells.forEach(cell=>myGrid[cell]=1);
+        myShips.push({cells,size:s.size});
+        placedShips.push(i);
+        document.querySelectorAll('.ship-item')[i].className='ship-item placed';
+        placed=true;
+      }
+    }
+  });
+  selectedShip=null;
+  document.getElementById('ready-btn').style.display='inline-block';
+  drawMyBoard();
+}
+
+enemyCanvas.addEventListener('click',e=>{
+  if(phase!=='battle'||!myTurn) return;
+  const rect=enemyCanvas.getBoundingClientRect();
+  const c=Math.floor((e.clientX-rect.left)/(rect.width/GRID));
+  const r=Math.floor((e.clientY-rect.top)/(rect.height/GRID));
+  const idx=r*GRID+c;
+  if(myHits[idx]) return;
+  if(isMulti){
+    socketEmit('game:action',{type:'bs:shot',idx});
+    myTurn=false;
+    document.getElementById('status-lbl').textContent='⏳ OPPONENT\'S TURN';
+  } else {
+    const hit=enemyCanvas._aiGrid[idx];
+    myHits[idx]=hit?2:1;
+    if(hit) myHitCount++;
+    drawEnemyBoard();
+    updateCounts();
+    if(myHitCount>=17){ endGame(true); return; }
+    myTurn=false;
+    document.getElementById('status-lbl').textContent='🤖 AI THINKING…';
+    setTimeout(aiShoot,700);
+  }
+});
+
+let aiShots=[];
+function aiShoot(){
+  let idx;
+  do { idx=Math.floor(Math.random()*100); } while(aiShots.includes(idx));
+  aiShots.push(idx);
+  const hit=myGrid[idx];
+  enemyGuesses[idx]=hit?2:1;
+  if(hit) oppHitCount++;
+  drawMyBoard(); updateCounts();
+  if(oppHitCount>=17){ endGame(false); return; }
+  myTurn=true;
+  document.getElementById('status-lbl').textContent='YOUR TURN — CLICK ENEMY WATERS';
+}
+
+socketOn('game:action',data=>{
+  if(data.type==='bs:ready'){
+    if(data.playerIndex!==PLAYER){
+      // Opponent is ready
+      if(phase==='wait'){
+        phase='battle';
+        myTurn=PLAYER===0;
+        document.getElementById('status-lbl').textContent=myTurn?'YOUR TURN':'⏳ OPPONENT\'S TURN';
+      }
+    }
+  }
+  if(data.type==='bs:shot' && data.playerIndex!==PLAYER){
+    const idx=data.idx;
+    const hit=myGrid[idx];
+    enemyGuesses[idx]=hit?2:1;
+    if(hit) oppHitCount++;
+    drawMyBoard(); updateCounts();
+    if(oppHitCount>=17){ endGame(false); return; }
+    myTurn=true;
+    document.getElementById('status-lbl').textContent='YOUR TURN — FIRE!';
+    showToast(hit?'💥 YOUR SHIP WAS HIT!':'MISS');
+  }
+  if(data.type==='bs:result' && data.playerIndex===PLAYER){
+    const {idx,hit}=data;
+    myHits[idx]=hit?2:1;
+    if(hit) myHitCount++;
+    drawEnemyBoard(); updateCounts();
+    if(myHitCount>=17){ endGame(true); }
+  }
+  if(data.type==='bs:reset'){ resetGame(); }
+});
+
+function endGame(won){
+  phase='done';
+  document.getElementById('result-text').textContent=won?'🏆 YOU WIN!':'💀 YOU LOSE';
+  document.getElementById('result-banner').style.display='flex';
+}
+
+function updateCounts(){
+  document.getElementById('hits-you').textContent=`HIT: ${myHitCount}`;
+  document.getElementById('hits-opp').textContent=`OPP: ${oppHitCount}`;
+}
+
+function drawMyBoard(){
+  drawBoard(myCtx, myGrid, enemyGuesses, hoverCells, true);
+}
+function drawEnemyBoard(){
+  drawBoard(enemyCtx, null, myHits, [], false);
+}
+
+function drawBoard(ctx, shipGrid, shots, hover, showShips){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#050c18'; ctx.fillRect(0,0,W,H);
+  for(let r=0;r<GRID;r++) for(let c=0;c<GRID;c++){
+    const idx=r*GRID+c;
+    // Cell bg
+    ctx.fillStyle='#0a1428';
+    ctx.fillRect(c*CELL+1,r*CELL+1,CELL-2,CELL-2);
+    // Ship
+    if(showShips && shipGrid && shipGrid[idx]){
+      ctx.fillStyle='rgba(0,200,255,0.2)';
+      ctx.fillRect(c*CELL+1,r*CELL+1,CELL-2,CELL-2);
+    }
+    // Hover
+    if(hover.includes(idx)){
+      const valid=hover.every(cell=>{ const cr=Math.floor(cell/GRID),cc=cell%GRID; return cr>=0&&cr<GRID&&cc>=0&&cc<GRID&&(!shipGrid||!shipGrid[cell]); });
+      ctx.fillStyle=valid?'rgba(0,255,136,0.3)':'rgba(255,60,60,0.3)';
+      ctx.fillRect(c*CELL+1,r*CELL+1,CELL-2,CELL-2);
+    }
+    // Shot result
+    if(shots[idx]===1){ // miss
+      ctx.fillStyle='rgba(255,255,255,0.15)';
+      ctx.beginPath(); ctx.arc(c*CELL+CELL/2,r*CELL+CELL/2,CELL*0.18,0,Math.PI*2); ctx.fill();
+    }
+    if(shots[idx]===2){ // hit
+      ctx.fillStyle='#ff3a5c';
+      ctx.shadowColor='#ff3a5c'; ctx.shadowBlur=12;
+      ctx.font=`${CELL*0.6}px Arial`; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('✕',c*CELL+CELL/2,r*CELL+CELL/2);
+      ctx.shadowBlur=0;
+    }
+  }
+  // Grid lines
+  ctx.strokeStyle='rgba(0,200,255,0.08)'; ctx.lineWidth=1;
+  for(let i=0;i<=GRID;i++){
+    ctx.beginPath(); ctx.moveTo(i*CELL,0); ctx.lineTo(i*CELL,H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,i*CELL); ctx.lineTo(W,i*CELL); ctx.stroke();
+  }
+}
+
+function resetGame(){
+  myGrid=Array(100).fill(0); myHits=Array(100).fill(0);
+  enemyGuesses=Array(100).fill(0); myShips=[]; placedShips=[];
+  myHitCount=0; oppHitCount=0; aiShots=[]; hoverCells=[];
+  phase='place'; myTurn=true; selectedShip=null; aiShots=[];
+  document.querySelectorAll('.ship-item').forEach(e=>e.className='ship-item');
+  document.getElementById('ready-btn').style.display='none';
+  document.getElementById('placement-ui').style.display='block';
+  document.getElementById('status-lbl').textContent='PLACE YOUR SHIPS';
+  document.getElementById('result-banner').style.display='none';
+  updateCounts(); drawMyBoard(); drawEnemyBoard();
+}
+
+document.getElementById('play-again-btn').addEventListener('click',()=>{
+  if(isMulti) socketEmit('game:action',{type:'bs:reset'}); else resetGame();
+});
+
+function showToast(msg){ const t=document.getElementById('gtoast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
+drawMyBoard(); drawEnemyBoard();
+</script>
+</body>
+</html>

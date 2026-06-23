@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Dots and Boxes</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>canvas { cursor: pointer; }</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WIN!</div>
+    <div class="banner-sub" id="result-sub">—</div>
+    <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+  </div>
+  <div class="hud">
+    <div class="hud-title">DOTS & BOXES</div>
+    <div class="hud-status" id="turn-label">—</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-1">P1: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-2">P2: 0</span>
+    </div>
+  </div>
+  <canvas id="cvs"></canvas>
+  <button class="btn btn-ghost" style="margin-top:4px" id="reset-btn">↺ RESET</button>
+  <div class="game-toast" id="gtoast"></div>
+</div>
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const GRID = 5; // 5x5 boxes = 6x6 dots
+const DOT_SPACE = Math.min(Math.floor((window.innerWidth-60)/(GRID+1)), Math.floor((window.innerHeight-230)/(GRID+1)), 75);
+const PAD = 30;
+const W = PAD*2 + GRID*DOT_SPACE;
+const H = W;
+cvs.width = W; cvs.height = H;
+
+// State
+let hLines = Array((GRID+1)*GRID).fill(0);   // horizontal lines [player]
+let vLines = Array(GRID*(GRID+1)).fill(0);   // vertical lines [player]
+let boxes  = Array(GRID*GRID).fill(0);         // box owner
+let turn = 1;
+let scores = [0,0];
+let gameOver = false;
+let isMulti = !IS_SOLO;
+let gameReady = !isMulti || PLAYER === 1; // joiner is always ready
+let myTeam = PLAYER===0?1:(PLAYER===1?2:1);
+let hoverLine = null;
+
+if (isMulti && PLAYER===0) {
+  document.getElementById('waiting-screen').style.display='flex';
+  document.getElementById('room-code-disp').textContent = ROOM||'----';
+}
+onRoomReady(()=>{
+  document.getElementById('waiting-screen').style.display='none';
+  gameReady=true;
+  showToast(myTeam===1?'YOU ARE CYAN':'YOU ARE ORANGE');
+  draw();
+});
+onPlayerLeft(()=>showToast('OPPONENT LEFT'));
+
+function dotPos(r,c) {
+  return { x: PAD + c*DOT_SPACE, y: PAD + r*DOT_SPACE };
+}
+
+function getHLine(r,c) { return { type:'h', idx: r*GRID+c, r, c }; }
+function getVLine(r,c) { return { type:'v', idx: r*(GRID+1)+c, r, c }; }
+
+function claimBoxes(player) {
+  let claimed = 0;
+  for (let r=0;r<GRID;r++) for (let c=0;c<GRID;c++) {
+    if (boxes[r*GRID+c]) continue;
+    const top    = hLines[r*GRID+c];
+    const bottom = hLines[(r+1)*GRID+c];
+    const left   = vLines[r*(GRID+1)+c];
+    const right  = vLines[r*(GRID+1)+c+1];
+    if (top && bottom && left && right) {
+      boxes[r*GRID+c] = player;
+      scores[player-1]++;
+      claimed++;
+    }
+  }
+  return claimed;
+}
+
+function applyLine(type, idx, player) {
+  if (type==='h') hLines[idx] = player;
+  else vLines[idx] = player;
+  const bonus = claimBoxes(player);
+  return bonus;
+}
+
+function getLineFromMouse(mx, my) {
+  const threshold = DOT_SPACE * 0.28;
+  // Check horizontal lines
+  for (let r=0;r<=GRID;r++) for (let c=0;c<GRID;c++) {
+    const x1 = PAD+c*DOT_SPACE, x2 = PAD+(c+1)*DOT_SPACE;
+    const y  = PAD+r*DOT_SPACE;
+    if (Math.abs(my-y)<threshold && mx>x1-threshold && mx<x2+threshold) {
+      if (!hLines[r*GRID+c]) return {type:'h', idx:r*GRID+c, r, c};
+    }
+  }
+  // Check vertical lines
+  for (let r=0;r<GRID;r++) for (let c=0;c<=GRID;c++) {
+    const x  = PAD+c*DOT_SPACE;
+    const y1 = PAD+r*DOT_SPACE, y2 = PAD+(r+1)*DOT_SPACE;
+    if (Math.abs(mx-x)<threshold && my>y1-threshold && my<y2+threshold) {
+      if (!vLines[r*(GRID+1)+c]) return {type:'v', idx:r*(GRID+1)+c, r, c};
+    }
+  }
+  return null;
+}
+
+cvs.addEventListener('mousemove', e=>{
+  const rect=cvs.getBoundingClientRect();
+  const scaleX=W/rect.width, scaleY=H/rect.height;
+  const mx=(e.clientX-rect.left)*scaleX, my=(e.clientY-rect.top)*scaleY;
+  hoverLine = getLineFromMouse(mx,my);
+  draw();
+});
+cvs.addEventListener('mouseleave',()=>{ hoverLine=null; draw(); });
+
+cvs.addEventListener('click', e=>{
+  if (!gameReady||gameOver) return;
+  if (isMulti && turn!==myTeam) return;
+  const rect=cvs.getBoundingClientRect();
+  const scaleX=W/rect.width, scaleY=H/rect.height;
+  const mx=(e.clientX-rect.left)*scaleX, my=(e.clientY-rect.top)*scaleY;
+  const line = getLineFromMouse(mx,my);
+  if (!line) return;
+  if (isMulti) socketEmit('game:action',{type:'dab:move', line});
+  else executeMove(line, turn);
+});
+
+function executeMove(line, player) {
+  const bonus = applyLine(line.type, line.idx, player);
+  updateScores();
+  if (!boxes.includes(0)) {
+    gameOver=true;
+    draw();
+    setTimeout(()=>{
+      const s1=scores[0], s2=scores[1];
+      const winner = s1>s2?1:s2>s1?2:0;
+      const text = document.getElementById('result-text');
+      const sub = document.getElementById('result-sub');
+      if (!winner) { text.textContent="DRAW!"; sub.textContent=''; }
+      else if (isMulti) { text.textContent=winner===myTeam?'🏆 YOU WIN!':'💀 YOU LOSE'; sub.textContent=`${s1} — ${s2}`; }
+      else { text.textContent=`PLAYER ${winner} WINS!`; sub.textContent=`${s1} — ${s2}`; }
+      document.getElementById('result-banner').style.display='flex';
+    },400);
+    return;
+  }
+  if (!bonus) turn = turn===1?2:1;
+  draw();
+  if (!isMulti && turn===2) setTimeout(aiMove, 350);
+}
+
+function aiMove() {
+  if (gameOver) return;
+  // Find a move that completes a box
+  for (let r=0;r<GRID;r++) for (let c=0;c<GRID;c++) {
+    if (boxes[r*GRID+c]) continue;
+    const sides = [
+      {type:'h',idx:r*GRID+c,val:hLines[r*GRID+c]},
+      {type:'h',idx:(r+1)*GRID+c,val:hLines[(r+1)*GRID+c]},
+      {type:'v',idx:r*(GRID+1)+c,val:vLines[r*(GRID+1)+c]},
+      {type:'v',idx:r*(GRID+1)+c+1,val:vLines[r*(GRID+1)+c+1]}
+    ];
+    const empty = sides.filter(s=>!s.val);
+    if (empty.length===1) { executeMove(empty[0],2); return; }
+  }
+  // Random empty line
+  const empH=[], empV=[];
+  hLines.forEach((v,i)=>{ if(!v) empH.push({type:'h',idx:i}); });
+  vLines.forEach((v,i)=>{ if(!v) empV.push({type:'v',idx:i}); });
+  const all=[...empH,...empV];
+  if (all.length) executeMove(all[Math.floor(Math.random()*all.length)],2);
+}
+
+socketOn('game:action', data=>{
+  if (data.type==='dab:move') {
+    if (data.playerIndex===PLAYER) return;
+    executeMove(data.line, turn);
+  }
+  if (data.type==='dab:reset') reset();
+});
+
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#050810'; ctx.fillRect(0,0,W,H);
+
+  // Boxes
+  for (let r=0;r<GRID;r++) for (let c=0;c<GRID;c++) {
+    const owner=boxes[r*GRID+c];
+    if (owner) {
+      ctx.fillStyle=owner===1?'rgba(0,200,255,0.18)':'rgba(255,107,43,0.18)';
+      ctx.fillRect(PAD+c*DOT_SPACE+2, PAD+r*DOT_SPACE+2, DOT_SPACE-4, DOT_SPACE-4);
+      ctx.fillStyle=owner===1?'rgba(0,200,255,0.6)':'rgba(255,107,43,0.6)';
+      ctx.font=`bold ${DOT_SPACE*0.35}px 'Baloo 2',sans-serif`;
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText(owner===1?'●':'●', PAD+c*DOT_SPACE+DOT_SPACE/2, PAD+r*DOT_SPACE+DOT_SPACE/2);
+    }
+  }
+
+  // Hover
+  if (hoverLine && gameReady && !gameOver) {
+    const color=turn===1?'rgba(0,200,255,0.5)':'rgba(255,107,43,0.5)';
+    ctx.strokeStyle=color; ctx.lineWidth=4; ctx.lineCap='round';
+    if (hoverLine.type==='h') {
+      const {r,c}=hoverLine;
+      const {x:x1,y:y1}=dotPos(r,c), {x:x2}=dotPos(r,c+1);
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y1); ctx.stroke();
+    } else {
+      const {r,c}=hoverLine;
+      const {x:x1,y:y1}=dotPos(r,c), {y:y2}=dotPos(r+1,c);
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x1,y2); ctx.stroke();
+    }
+  }
+
+  // Drawn horizontal lines
+  for (let r=0;r<=GRID;r++) for (let c=0;c<GRID;c++) {
+    const v=hLines[r*GRID+c];
+    if (!v) continue;
+    const {x:x1,y:y1}=dotPos(r,c), {x:x2}=dotPos(r,c+1);
+    ctx.strokeStyle=v===1?'#00c8ff':'#ff6b2b';
+    ctx.lineWidth=4; ctx.lineCap='round';
+    ctx.shadowColor=ctx.strokeStyle; ctx.shadowBlur=10;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y1); ctx.stroke();
+    ctx.shadowBlur=0;
+  }
+
+  // Drawn vertical lines
+  for (let r=0;r<GRID;r++) for (let c=0;c<=GRID;c++) {
+    const v=vLines[r*(GRID+1)+c];
+    if (!v) continue;
+    const {x:x1,y:y1}=dotPos(r,c), {y:y2}=dotPos(r+1,c);
+    ctx.strokeStyle=v===1?'#00c8ff':'#ff6b2b';
+    ctx.lineWidth=4; ctx.lineCap='round';
+    ctx.shadowColor=ctx.strokeStyle; ctx.shadowBlur=10;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x1,y2); ctx.stroke();
+    ctx.shadowBlur=0;
+  }
+
+  // Dots
+  for (let r=0;r<=GRID;r++) for (let c=0;c<=GRID;c++) {
+    const {x,y}=dotPos(r,c);
+    ctx.fillStyle='#a0b0d0';
+    ctx.shadowColor='#00c8ff'; ctx.shadowBlur=8;
+    ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0;
+  }
+
+  // Turn label
+  const lbl=document.getElementById('turn-label');
+  if (!gameReady) { lbl.textContent='WAITING…'; return; }
+  if (gameOver) return;
+  if (isMulti) lbl.textContent=turn===myTeam?'🟢 YOUR TURN':'⏳ OPPONENT';
+  else lbl.textContent=`PLAYER ${turn}'S TURN`;
+}
+
+function updateScores() {
+  document.getElementById('score-1').textContent=`P1: ${scores[0]}`;
+  document.getElementById('score-2').textContent=`P2: ${scores[1]}`;
+}
+
+function reset() {
+  hLines=Array((GRID+1)*GRID).fill(0);
+  vLines=Array(GRID*(GRID+1)).fill(0);
+  boxes=Array(GRID*GRID).fill(0);
+  turn=1; scores=[0,0]; gameOver=false; hoverLine=null;
+  document.getElementById('result-banner').style.display='none';
+  updateScores(); draw();
+}
+
+document.getElementById('reset-btn').addEventListener('click',()=>{
+  if(isMulti) socketEmit('game:action',{type:'dab:reset'}); else reset();
+});
+document.getElementById('play-again-btn').addEventListener('click',()=>{
+  if(isMulti) socketEmit('game:action',{type:'dab:reset'}); else reset();
+});
+
+function showToast(msg){ const t=document.getElementById('gtoast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
+draw();
+</script>
+</body>
+</html>

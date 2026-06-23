@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Word Guess Duel</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>
+  body { overflow: auto; }
+  .game-wrap { height: auto; min-height: 100vh; justify-content: flex-start; padding: 10px 12px 24px; gap: 10px; overflow: auto; }
+  .word-grid { display: grid; grid-template-rows: repeat(6,1fr); gap: 6px; }
+  .word-row { display: flex; gap: 6px; }
+  .letter-tile {
+    width: clamp(42px,10vw,56px); height: clamp(42px,10vw,56px);
+    border: 2px solid rgba(0,200,255,0.2);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Baloo 2',sans-serif;
+    font-size: clamp(16px,4vw,22px);
+    font-weight: 800;
+    color: var(--text);
+    background: var(--card);
+    transition: all 0.15s;
+    text-transform: uppercase;
+  }
+  .letter-tile.active { border-color: var(--cyan); }
+  .letter-tile.correct { background: #166534; border-color: #22c55e; color: #fff; }
+  .letter-tile.present { background: #854d0e; border-color: #eab308; color: #fff; }
+  .letter-tile.absent  { background: #1f2937; border-color: #374151; color: var(--muted); }
+  .letter-tile.reveal  { animation: flipTile 0.5s ease forwards; }
+  @keyframes flipTile {
+    0%   { transform: rotateX(0); }
+    50%  { transform: rotateX(90deg); }
+    100% { transform: rotateX(0); }
+  }
+  .kb {
+    display: flex; flex-direction: column; gap: 5px; align-items: center;
+    width: 100%; max-width: 420px;
+  }
+  .kb-row { display: flex; gap: 4px; }
+  .kb-key {
+    height: 44px; min-width: 30px; padding: 0 6px;
+    border-radius: 6px;
+    background: #1f2937;
+    border: none; color: var(--text);
+    font-family: 'Baloo 2',sans-serif;
+    font-size: 11px; font-weight: 800;
+    cursor: pointer; transition: all 0.15s;
+    letter-spacing: 0.05em;
+  }
+  .kb-key.wide { min-width: 52px; font-size: 10px; }
+  .kb-key:hover { background: #374151; }
+  .kb-key.correct { background: #166534; color: #fff; }
+  .kb-key.present { background: #854d0e; color: #fff; }
+  .kb-key.absent  { background: #111827; color: #4b5563; }
+  .duel-col { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .duel-boards { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+  .board-label { font-family:'Baloo 2',sans-serif; font-size: 10px; letter-spacing: 0.2em; color: var(--muted); }
+  .opp-grid { opacity: 0.7; transform: scale(0.82); transform-origin: top center; }
+</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WIN!</div>
+    <div class="banner-sub" id="result-sub">THE WORD WAS: -----</div>
+    <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+  </div>
+  <div class="hud">
+    <div class="hud-title">WORD GUESS DUEL</div>
+    <div class="hud-status" id="status-lbl">GUESS THE 5-LETTER WORD</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-you">YOU: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-opp">OPP: 0</span>
+    </div>
+  </div>
+
+  <div class="duel-boards">
+    <div class="duel-col">
+      <div class="board-label" id="my-label">YOUR BOARD</div>
+      <div class="word-grid" id="my-grid"></div>
+    </div>
+    <div class="duel-col" id="opp-col" style="display:none">
+      <div class="board-label">OPPONENT</div>
+      <div class="word-grid opp-grid" id="opp-grid"></div>
+    </div>
+  </div>
+
+  <div class="kb" id="keyboard"></div>
+  <div class="game-toast" id="gtoast"></div>
+</div>
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const WORDS=['FLAME','BRICK','GLOOM','SHINY','PLAZA','CRISP','DRIFT','BRAVE','GRASP','PLUNK','FROST','GRAND','KNEEL','PRISM','SCOUT','BLEND','CHAMP','DRAFT','EMBED','FLAIR','GHOST','HASTE','IDEAL','JOUST','KNACK','LUNAR','MAUVE','NOBLE','OZONE','PERCH','QUAKE','RISKY','SLUMP','THRIVE','ULTRA','VALID','WRATH','YACHT','ZONAL','BANJO','CHESS','DECOY','EPOXY','FOYER','GRIMY','HYPER','INPUT','JELLY','KARMA','LYMPH','MAGIC','NERVE','ORBIT','PYGMY','QUIRK','REBEL','SYNTH','TAUNT','UMBRA','VIVID','WHISK','XENON','YEARN','ZESTY'];
+
+let target='', guesses=[], currentGuess='', row=0, gameOver=false;
+let oppGuesses=[], oppRow=0;
+let keyColors={};
+let isMulti=!IS_SOLO, gameReady=!isMulti;
+let myTeam=PLAYER===0?1:(PLAYER===1?2:1);
+let scores=[0,0];
+
+if(isMulti&&PLAYER===0){
+  document.getElementById('waiting-screen').style.display='flex';
+  document.getElementById('room-code-disp').textContent=ROOM||'----';
+}
+onRoomReady(()=>{
+  document.getElementById('waiting-screen').style.display='none';
+  document.getElementById('opp-col').style.display='flex';
+  gameReady=true;
+  showToast('OPPONENT JOINED!');
+  if(PLAYER===0){ target=WORDS[Math.floor(Math.random()*WORDS.length)]; socketEmit('game:action',{type:'wg:word',word:target}); }
+});
+onPlayerLeft(()=>showToast('OPPONENT LEFT'));
+
+socketOn('game:action',data=>{
+  if(data.type==='wg:word'&&data.playerIndex!==PLAYER){ target=data.word; buildGrid('my-grid'); }
+  if(data.type==='wg:guess'&&data.playerIndex!==PLAYER){ renderOppRow(data.result,data.guess); }
+  if(data.type==='wg:won'&&data.playerIndex!==PLAYER){ endGame(false,data.word,data.guesses); }
+  if(data.type==='wg:lost'&&data.playerIndex!==PLAYER){ endGame(true,data.word,data.guesses); }
+  if(data.type==='wg:reset'){ newGame(); }
+});
+
+function buildGrid(id,rows=6,cols=5){
+  const g=document.getElementById(id); g.innerHTML='';
+  for(let r=0;r<rows;r++){
+    const row=document.createElement('div'); row.className='word-row';
+    for(let c=0;c<cols;c++){
+      const t=document.createElement('div'); t.className='letter-tile';
+      t.id=`${id}-${r}-${c}`; row.appendChild(t);
+    }
+    g.appendChild(row);
+  }
+}
+
+function buildKeyboard(){
+  const kb=document.getElementById('keyboard');
+  kb.innerHTML='';
+  const rows=[['Q','W','E','R','T','Y','U','I','O','P'],['A','S','D','F','G','H','J','K','L'],['ENTER','Z','X','C','V','B','N','M','⌫']];
+  rows.forEach(keys=>{
+    const row=document.createElement('div'); row.className='kb-row';
+    keys.forEach(k=>{
+      const btn=document.createElement('button');
+      btn.className='kb-key'+(k.length>1?' wide':'');
+      btn.textContent=k; btn.dataset.key=k;
+      btn.addEventListener('click',()=>handleKey(k));
+      row.appendChild(btn);
+    });
+    kb.appendChild(row);
+  });
+}
+
+function handleKey(k){
+  if(!gameReady||gameOver) return;
+  if(k==='⌫'||k==='BACKSPACE'){ if(currentGuess.length>0){ currentGuess=currentGuess.slice(0,-1); renderCurrentRow(); } return; }
+  if(k==='ENTER'){ submitGuess(); return; }
+  if(currentGuess.length<5 && /^[A-Z]$/.test(k)){ currentGuess+=k; renderCurrentRow(); }
+}
+
+document.addEventListener('keydown',e=>{
+  const k=e.key.toUpperCase();
+  if(k==='ENTER') handleKey('ENTER');
+  else if(k==='BACKSPACE') handleKey('⌫');
+  else if(/^[A-Z]$/.test(k)) handleKey(k);
+});
+
+function renderCurrentRow(){
+  for(let c=0;c<5;c++){
+    const t=document.getElementById(`my-grid-${row}-${c}`);
+    if(!t) return;
+    t.textContent=currentGuess[c]||'';
+    t.className='letter-tile'+(currentGuess[c]?' active':'');
+  }
+}
+
+function submitGuess(){
+  if(currentGuess.length!==5){ showToast('NEED 5 LETTERS'); return; }
+  if(!WORDS.includes(currentGuess)&&!IS_SOLO){ /* allow any for solo */ }
+  const result=evaluate(currentGuess,target);
+  revealRow(row,'my-grid',currentGuess,result);
+  guesses.push(currentGuess);
+  updateKeyboard(currentGuess,result);
+  if(isMulti) socketEmit('game:action',{type:'wg:guess',guess:currentGuess,result});
+  if(currentGuess===target){
+    scores[myTeam-1]++; updateScores();
+    if(isMulti) socketEmit('game:action',{type:'wg:won',word:target,guesses});
+    setTimeout(()=>endGame(true,target,guesses),600);
+  } else if(row>=5){
+    if(isMulti) socketEmit('game:action',{type:'wg:lost',word:target,guesses});
+    setTimeout(()=>endGame(false,target,guesses),600);
+  }
+  currentGuess=''; row++;
+}
+
+function evaluate(guess,target){
+  const result=Array(5).fill('absent');
+  const tArr=[...target], gArr=[...guess];
+  // Correct
+  tArr.forEach((ch,i)=>{ if(gArr[i]===ch){ result[i]='correct'; tArr[i]=null; gArr[i]=null; } });
+  // Present
+  gArr.forEach((ch,i)=>{ if(ch&&tArr.includes(ch)){ result[i]='present'; tArr[tArr.indexOf(ch)]=null; } });
+  return result;
+}
+
+function revealRow(r,gridId,guess,result,delay=0){
+  for(let c=0;c<5;c++){
+    const t=document.getElementById(`${gridId}-${r}-${c}`);
+    if(!t) continue;
+    const cl=result[c];
+    setTimeout(()=>{
+      t.textContent=guess[c]||'';
+      t.className=`letter-tile ${cl} reveal`;
+    }, delay+c*120);
+  }
+}
+
+function renderOppRow(result,guess){
+  revealRow(oppRow,'opp-grid',guess,result);
+  oppRow++;
+}
+
+function updateKeyboard(guess,result){
+  const priority={correct:3,present:2,absent:1};
+  guess.split('').forEach((ch,i)=>{
+    const cl=result[i];
+    if(!keyColors[ch]||priority[cl]>priority[keyColors[ch]]) keyColors[ch]=cl;
+  });
+  document.querySelectorAll('.kb-key').forEach(btn=>{
+    const k=btn.dataset.key;
+    if(keyColors[k]) btn.className=`kb-key ${keyColors[k]}${k.length>1?' wide':''}`;
+  });
+}
+
+function endGame(won,word,gs){
+  gameOver=true;
+  const text=document.getElementById('result-text');
+  const sub=document.getElementById('result-sub');
+  if(isMulti){ text.textContent=won?'🏆 YOU WIN!':'💀 YOU LOSE'; }
+  else { text.textContent=won?`🏆 SOLVED IN ${gs.length}!`:'💀 GAME OVER'; }
+  sub.textContent=`THE WORD WAS: ${word}`;
+  document.getElementById('result-banner').style.display='flex';
+}
+
+function newGame(){
+  target=WORDS[Math.floor(Math.random()*WORDS.length)];
+  guesses=[]; currentGuess=''; row=0; gameOver=false; keyColors={}; oppRow=0;
+  oppGuesses=[]; oppRow=0;
+  buildGrid('my-grid'); buildGrid('opp-grid');
+  buildKeyboard();
+  document.getElementById('result-banner').style.display='none';
+  document.getElementById('status-lbl').textContent='GUESS THE 5-LETTER WORD';
+  if(isMulti&&PLAYER===0) socketEmit('game:action',{type:'wg:word',word:target});
+}
+
+function updateScores(){
+  document.getElementById('score-you').textContent=`YOU: ${scores[myTeam-1]}`;
+  document.getElementById('score-opp').textContent=`OPP: ${scores[myTeam===1?1:0]}`;
+}
+
+document.getElementById('play-again-btn').addEventListener('click',()=>{
+  if(isMulti) socketEmit('game:action',{type:'wg:reset'}); else newGame();
+});
+
+function showToast(msg){ const t=document.getElementById('gtoast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2500); }
+
+buildGrid('my-grid'); buildGrid('opp-grid'); buildKeyboard();
+if(!isMulti){ target=WORDS[Math.floor(Math.random()*WORDS.length)]; }
+</script>
+</body>
+</html>

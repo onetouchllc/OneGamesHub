@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Pong</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>
+  body { overflow: hidden; touch-action: none; }
+  .game-wrap { gap: 8px; }
+
+  /* Mobile touch paddle zones — shown only on touch devices */
+  .touch-zones {
+    display: none;
+    width: 100%;
+    max-width: 860px;
+    gap: 6px;
+    position: relative;
+    z-index: 2;
+  }
+  @media (pointer: coarse) {
+    .touch-zones { display: flex; }
+    .key-hint { display: none; }
+  }
+  .touch-zone {
+    flex: 1;
+    height: 52px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Baloo 2', sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    background: var(--surface);
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.15s;
+  }
+  .touch-zone.active { border-color: var(--cyan); color: var(--cyan); }
+  .touch-zone.p2.active { border-color: var(--orange); color: var(--orange); }
+  .touch-zone::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(0,200,255,0.06), transparent);
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .touch-zone.active::before { opacity: 1; }
+
+  .controls { display:flex; gap:10px; }
+  .key-hint { font-size:11px; color:var(--muted); letter-spacing:0.1em; text-align:center; }
+
+  /* Landscape warning for mobile */
+  #landscape-hint {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    z-index: 500;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    font-family: 'Baloo 2', sans-serif;
+    text-align: center;
+    padding: 24px;
+  }
+  .landscape-icon { font-size: 56px; animation: rotate90 2s infinite; }
+  @keyframes rotate90 { 0%,100%{transform:rotate(0deg)}50%{transform:rotate(90deg)} }
+  @media (pointer: coarse) and (max-width: 600px) and (orientation: portrait) {
+    #landscape-hint { display: flex; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Landscape hint for portrait phones -->
+<div id="landscape-hint">
+  <div class="landscape-icon">📱</div>
+  <div style="font-size:14px;color:var(--cyan);letter-spacing:0.2em">ROTATE YOUR PHONE</div>
+  <div style="font-size:11px;color:var(--muted);letter-spacing:0.1em;margin-top:4px">PONG PLAYS BEST IN LANDSCAPE</div>
+</div>
+
+<div class="game-wrap">
+
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WINNER!</div>
+    <div class="banner-sub" id="result-sub">—</div>
+    <div style="display:flex;gap:12px;margin-top:4px">
+      <button class="btn btn-cyan" id="play-again-btn">▶ PLAY AGAIN</button>
+    </div>
+  </div>
+
+  <div class="hud">
+    <div class="hud-title">PONG</div>
+    <div class="hud-status" id="status-label">PRESS START</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-left">0</span>
+      &nbsp;:&nbsp;
+      <span class="score-p2" id="score-right">0</span>
+    </div>
+  </div>
+
+  <canvas id="cvs"></canvas>
+
+  <!-- Mobile touch zones: slide finger up/down on your side -->
+  <div class="touch-zones">
+    <div class="touch-zone" id="touch-p1">
+      <span>◀ SLIDE UP/DOWN</span>
+    </div>
+    <div class="touch-zone p2" id="touch-p2">
+      <span>SLIDE UP/DOWN ▶</span>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="btn btn-cyan" id="start-btn">▶ START</button>
+    <button class="btn btn-ghost" id="reset-btn">↺ RESET</button>
+  </div>
+  <div class="key-hint" id="key-hint">MOVE MOUSE OVER CANVAS · FIRST TO 7 WINS</div>
+
+  <div class="game-toast" id="gtoast"></div>
+</div>
+
+<script src="/js/socket-bridge.js"></script>
+<script>
+if (isMulti && PLAYER === 1) {
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+
+const W = 800, H = 480;
+cvs.width = W; cvs.height = H;
+
+function resize() {
+  const maxW = Math.min(window.innerWidth - 16, 860);
+  const maxH = window.innerHeight - 170;
+  const scale = Math.min(maxW / W, maxH / H);
+  cvs.style.width  = (W * scale) + 'px';
+  cvs.style.height = (H * scale) + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+const PH = 80, PW = 12, BR = 8;
+let isMulti = !IS_SOLO;
+let gameReady = !isMulti || PLAYER === 1;
+let running = false;
+
+let state = {
+  ball: { x:W/2, y:H/2, vx:4, vy:3 },
+  paddles: [
+    { x:20, y:H/2-PH/2, score:0 },
+    { x:W-20-PW, y:H/2-PH/2, score:0 }
+  ],
+  winner: null
+};
+
+let myPaddleIdx = PLAYER === 1 ? 1 : 0;
+let animId;
+
+if (isMulti && PLAYER === 0) {
+  document.getElementById('waiting-screen').style.display = 'flex';
+  document.getElementById('room-code-disp').textContent = ROOM || '----';
+}
+
+onRoomReady(() => {
+  document.getElementById('waiting-screen').style.display = 'none';
+  gameReady = true;
+  document.getElementById('key-hint').textContent = PLAYER === 0
+    ? 'YOU ARE LEFT (CYAN) · SLIDE LEFT ZONE'
+    : 'YOU ARE RIGHT (ORANGE) · SLIDE RIGHT ZONE';
+  showToast('OPPONENT JOINED!');
+});
+onPlayerLeft(() => { running = false; showToast('OPPONENT LEFT'); });
+
+// ── Mouse control (desktop) ──
+cvs.addEventListener('mousemove', e => {
+  if (!gameReady || state.winner) return;
+  const rect = cvs.getBoundingClientRect();
+  const y = (e.clientY - rect.top) * (H / rect.height) - PH/2;
+  movePaddle(Math.max(0, Math.min(H-PH, y)));
+});
+
+// ── Touch zones (mobile) ──
+// Each half of the canvas / touch-zone controls a paddle
+// Solo: left=P1 mouse/touch, right=AI
+// Multi: your zone controls your paddle
+
+function getPaddleYFromTouchY(clientY, rect) {
+  return Math.max(0, Math.min(H - PH, (clientY - rect.top) * (H / rect.height) - PH/2));
+}
+
+function movePaddle(y) {
+  state.paddles[myPaddleIdx].y = y;
+  if (isMulti) socketEmit('pong:paddle', { y });
+}
+
+// Canvas touch (drag on canvas works on both mobile/desktop)
+cvs.addEventListener('touchstart', e => { e.preventDefault(); }, { passive: false });
+cvs.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!gameReady || state.winner) return;
+  const rect = cvs.getBoundingClientRect();
+  // Determine which side the touch is on
+  const touch = e.touches[0];
+  const touchX = touch.clientX - rect.left;
+  const isLeftSide = touchX < rect.width / 2;
+  // Solo: left side = P1, right side does nothing (AI)
+  // Multi: only move your own paddle
+  if (isMulti) {
+    movePaddle(getPaddleYFromTouchY(touch.clientY, rect));
+  } else {
+    if (isLeftSide) movePaddle(getPaddleYFromTouchY(touch.clientY, rect));
+  }
+}, { passive: false });
+
+// Touch zones below canvas
+const tp1 = document.getElementById('touch-p1');
+const tp2 = document.getElementById('touch-p2');
+
+function setupTouchZone(el, paddleIdx) {
+  let active = false;
+  el.addEventListener('touchstart', e => {
+    e.preventDefault();
+    active = true;
+    el.classList.add('active');
+  }, { passive: false });
+
+  el.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (!gameReady || state.winner || !active) return;
+    // Map finger Y within zone to paddle Y on canvas
+    const rect = cvs.getBoundingClientRect();
+    const touch = e.touches[0];
+    const y = getPaddleYFromTouchY(touch.clientY, rect);
+    if (!isMulti || paddleIdx === myPaddleIdx) {
+      state.paddles[paddleIdx].y = y;
+      if (isMulti) socketEmit('pong:paddle', { y });
+    }
+  }, { passive: false });
+
+  el.addEventListener('touchend', e => {
+    e.preventDefault();
+    active = false;
+    el.classList.remove('active');
+  }, { passive: false });
+}
+
+setupTouchZone(tp1, 0);
+setupTouchZone(tp2, 1);
+
+// ── Buttons ──
+document.getElementById('start-btn').addEventListener('click', () => {
+  if (!gameReady) { showToast('WAITING FOR OPPONENT'); return; }
+  if (state.winner) return;
+  if (isMulti) socketEmit('pong:start', {});
+  else { running = true; if (!animId) gameLoop(); }
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('pong:reset', {});
+  else { running=false; cancelAnimationFrame(animId); animId=null; resetLocal(); }
+});
+
+document.getElementById('play-again-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('pong:reset', {});
+  else { running=false; cancelAnimationFrame(animId); animId=null; resetLocal(); }
+});
+
+function resetLocal() {
+  state.ball = { x:W/2, y:H/2, vx:4, vy:3 };
+  state.paddles[0] = { x:20, y:H/2-PH/2, score:0 };
+  state.paddles[1] = { x:W-20-PW, y:H/2-PH/2, score:0 };
+  state.winner = null; running = false;
+  document.getElementById('result-banner').style.display = 'none';
+  updateScores(); draw();
+}
+
+// ── Solo physics ──
+function tickLocal() {
+  if (!running || state.winner) return;
+  const b = state.ball;
+  b.x += b.vx; b.y += b.vy;
+  if (b.y-BR<0) { b.y=BR; b.vy=Math.abs(b.vy); }
+  if (b.y+BR>H) { b.y=H-BR; b.vy=-Math.abs(b.vy); }
+  const [p0,p1] = state.paddles;
+  if (b.x-BR<p0.x+PW && b.x>p0.x && b.y>p0.y && b.y<p0.y+PH) {
+    b.x=p0.x+PW+BR; b.vx=Math.abs(b.vx)*1.04;
+    b.vy += (b.y-(p0.y+PH/2))*0.1;
+  }
+  if (b.x+BR>p1.x && b.x<p1.x+PW && b.y>p1.y && b.y<p1.y+PH) {
+    b.x=p1.x-BR; b.vx=-Math.abs(b.vx)*1.04;
+    b.vy += (b.y-(p1.y+PH/2))*0.1;
+  }
+  const spd = Math.sqrt(b.vx*b.vx+b.vy*b.vy);
+  if (spd>14) { b.vx=b.vx/spd*14; b.vy=b.vy/spd*14; }
+  if (b.x<0) {
+    p1.score++; updateScores();
+    if (p1.score>=7) { state.winner=1; running=false; showResult(); }
+    else Object.assign(state.ball,{x:W/2,y:H/2,vx:-4,vy:3*(Math.random()>.5?1:-1)});
+  }
+  if (b.x>W) {
+    p0.score++; updateScores();
+    if (p0.score>=7) { state.winner=0; running=false; showResult(); }
+    else Object.assign(state.ball,{x:W/2,y:H/2,vx:4,vy:3*(Math.random()>.5?1:-1)});
+  }
+  // AI
+  if (!isMulti) {
+    const ai = p1, tgt = b.y - PH/2;
+    ai.y += (tgt - ai.y) * 0.07;
+    ai.y = Math.max(0, Math.min(H-PH, ai.y));
+  }
+}
+
+function gameLoop() { tickLocal(); draw(); if (running) animId = requestAnimationFrame(gameLoop); }
+
+// ── Multiplayer sync ──
+socketOn('pong:state', s => {
+  state = s; updateScores();
+  if (s.running && !animId) { running=true; animId=requestAnimationFrame(multiDraw); }
+  if (s.winner!=null) { running=false; cancelAnimationFrame(animId); animId=null; showResult(); }
+  draw();
+});
+function multiDraw() {
+  draw();
+  if (running && !state.winner) animId = requestAnimationFrame(multiDraw);
+  else animId = null;
+}
+
+// ── Draw ──
+function draw() {
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#050810'; ctx.fillRect(0,0,W,H);
+  // Center dashes
+  ctx.setLineDash([10,14]);
+  ctx.strokeStyle='rgba(0,200,255,0.12)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(W/2,0); ctx.lineTo(W/2,H); ctx.stroke();
+  ctx.setLineDash([]);
+  // Paddles
+  drawPaddle(state.paddles[0],'#00c8ff');
+  drawPaddle(state.paddles[1],'#ff6b2b');
+  // Ball
+  const b = state.ball;
+  ctx.shadowColor='#fff'; ctx.shadowBlur=16;
+  ctx.fillStyle='#fff';
+  ctx.beginPath(); ctx.arc(b.x,b.y,BR,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0;
+  // Canvas scores
+  ctx.font='bold 56px 'Baloo 2',sans-serif'; ctx.textAlign='center';
+  ctx.fillStyle='rgba(0,200,255,0.12)';
+  ctx.fillText(state.paddles[0].score, W/4, 68);
+  ctx.fillStyle='rgba(255,107,43,0.12)';
+  ctx.fillText(state.paddles[1].score, W*3/4, 68);
+}
+
+function drawPaddle(p, color) {
+  ctx.shadowColor=color; ctx.shadowBlur=20;
+  ctx.fillStyle=color;
+  ctx.beginPath(); ctx.roundRect(p.x,p.y,PW,PH,6); ctx.fill();
+  ctx.shadowBlur=0;
+}
+
+function updateScores() {
+  document.getElementById('score-left').textContent  = state.paddles[0].score;
+  document.getElementById('score-right').textContent = state.paddles[1].score;
+}
+
+function showResult() {
+  const t=document.getElementById('result-text'), s=document.getElementById('result-sub');
+  if (isMulti) {
+    t.textContent = state.winner===myPaddleIdx ? '🏆 YOU WIN!' : '💀 YOU LOSE';
+    s.textContent = `${state.paddles[0].score} — ${state.paddles[1].score}`;
+  } else {
+    t.textContent = state.winner===0 ? '🏆 PLAYER 1 WINS!' : '🤖 AI WINS!';
+    s.textContent = `${state.paddles[0].score} — ${state.paddles[1].score}`;
+  }
+  document.getElementById('result-banner').style.display = 'flex';
+}
+
+function showToast(msg) {
+  const t=document.getElementById('gtoast');
+  t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2500);
+}
+
+draw();
+</script>
+</body>
+</html>

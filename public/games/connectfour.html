@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Connect Four</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>canvas { cursor: pointer; }</style>
+</head>
+<body>
+<div class="game-wrap">
+
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WIN!</div>
+    <div class="banner-sub" id="result-sub">—</div>
+    <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+  </div>
+
+  <div class="hud">
+    <div class="hud-title">CONNECT FOUR</div>
+    <div class="hud-status" id="turn-label">—</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-1">P1: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-2">P2: 0</span>
+    </div>
+  </div>
+
+  <canvas id="cvs"></canvas>
+  <button class="btn btn-ghost" style="margin-top:4px" id="reset-btn">↺ RESET</button>
+  <div class="game-toast" id="gtoast"></div>
+</div>
+
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const COLS = 7, ROWS = 6;
+const CELL = Math.min(Math.floor((window.innerWidth - 40) / COLS), Math.floor((window.innerHeight - 220) / ROWS), 80);
+const PAD = CELL * 0.12;
+const W = COLS * CELL, H = ROWS * CELL;
+cvs.width = W; cvs.height = H;
+
+let board = Array(ROWS * COLS).fill(null);
+let currentPlayer = 1;
+let winner = null;
+let gameOver = false;
+let scores = [0, 0];
+let hoverCol = -1;
+let isMulti = !IS_SOLO;
+let gameReady = !isMulti || PLAYER === 1; // joiner is always ready
+let myPlayer = PLAYER === 0 ? 1 : (PLAYER === 1 ? 2 : 1);
+
+if (isMulti && PLAYER === 0) {
+  document.getElementById('waiting-screen').style.display = 'flex';
+  document.getElementById('room-code-disp').textContent = ROOM || '----';
+}
+
+onRoomReady(() => {
+  document.getElementById('waiting-screen').style.display = 'none';
+  gameReady = true;
+  showToast(PLAYER === 0 ? 'YOU ARE CYAN (P1)' : 'YOU ARE ORANGE (P2)');
+  draw();
+});
+onPlayerLeft(() => showToast('OPPONENT LEFT'));
+
+const COLORS = { 1: '#00c8ff', 2: '#ff6b2b', null: null };
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0a0f1e';
+  ctx.fillRect(0, 0, W, H);
+
+  // Hover column highlight
+  if (hoverCol >= 0 && !winner && gameReady) {
+    const myTurn = !isMulti || currentPlayer === myPlayer;
+    if (myTurn) {
+      ctx.fillStyle = `rgba(${currentPlayer===1?'0,200,255':'255,107,43'},0.07)`;
+      ctx.fillRect(hoverCol * CELL, 0, CELL, H);
+    }
+  }
+
+  // Grid cells
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const val = board[r * COLS + c];
+      const cx = c * CELL + CELL/2, cy = r * CELL + CELL/2;
+      const radius = CELL/2 - PAD;
+
+      // Cell bg
+      ctx.fillStyle = '#111827';
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI*2);
+      ctx.fill();
+
+      if (val) {
+        const color = COLORS[val];
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 18;
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius - 2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        // Shine
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.beginPath();
+        ctx.arc(cx - radius*0.25, cy - radius*0.25, radius*0.35, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,200,255,0.08)';
+  ctx.lineWidth = 1;
+  for (let c = 1; c < COLS; c++) {
+    ctx.beginPath(); ctx.moveTo(c*CELL,0); ctx.lineTo(c*CELL,H); ctx.stroke();
+  }
+
+  updateTurnLabel();
+}
+
+function updateTurnLabel() {
+  const lbl = document.getElementById('turn-label');
+  if (!gameReady) { lbl.textContent = 'WAITING…'; return; }
+  if (winner) return;
+  if (isMulti) {
+    lbl.textContent = currentPlayer === myPlayer ? '🟢 YOUR TURN' : '⏳ OPPONENT';
+    lbl.style.color = currentPlayer === myPlayer ? '#00ff88' : 'var(--muted)';
+  } else {
+    lbl.textContent = `PLAYER ${currentPlayer}'S TURN`;
+    lbl.style.color = currentPlayer === 1 ? '#00c8ff' : '#ff6b2b';
+  }
+}
+
+cvs.addEventListener('mousemove', e => {
+  const rect = cvs.getBoundingClientRect();
+  hoverCol = Math.floor((e.clientX - rect.left) / (rect.width / COLS));
+  draw();
+});
+cvs.addEventListener('mouseleave', () => { hoverCol = -1; draw(); });
+
+cvs.addEventListener('click', e => {
+  if (!gameReady || winner) return;
+  if (isMulti && currentPlayer !== myPlayer) return;
+  const rect = cvs.getBoundingClientRect();
+  const col = Math.floor((e.clientX - rect.left) / (rect.width / COLS));
+  if (isMulti) {
+    socketEmit('c4:move', { col });
+  } else {
+    localMove(col, currentPlayer);
+  }
+});
+
+function localMove(col, player) {
+  let row = -1;
+  for (let r = ROWS-1; r >= 0; r--) {
+    if (!board[r * COLS + col]) { row = r; break; }
+  }
+  if (row < 0) return;
+  board[row * COLS + col] = player;
+  const w = checkWinner();
+  if (w) {
+    winner = w;
+    if (winner !== 'draw') scores[winner-1]++;
+    updateScores();
+    draw();
+    setTimeout(showResult, 300);
+  } else {
+    currentPlayer = currentPlayer === 1 ? 2 : 1;
+    draw();
+    if (!isMulti && currentPlayer === 2) setTimeout(aiMove, 350);
+  }
+}
+
+function aiMove() {
+  if (winner) return;
+  // Try to win
+  for (let c = 0; c < COLS; c++) {
+    const test = [...board];
+    for (let r = ROWS-1; r >= 0; r--) {
+      if (!test[r*COLS+c]) { test[r*COLS+c] = 2; break; }
+    }
+    if (checkWinnerBoard(test) === 2) { localMove(c, 2); return; }
+  }
+  // Block
+  for (let c = 0; c < COLS; c++) {
+    const test = [...board];
+    for (let r = ROWS-1; r >= 0; r--) {
+      if (!test[r*COLS+c]) { test[r*COLS+c] = 1; break; }
+    }
+    if (checkWinnerBoard(test) === 1) { localMove(c, 2); return; }
+  }
+  // Center or random
+  const pref = [3,2,4,1,5,0,6].find(c => {
+    for (let r = ROWS-1; r >= 0; r--) if (!board[r*COLS+c]) return true;
+    return false;
+  });
+  localMove(pref ?? 0, 2);
+}
+
+function checkWinnerBoard(b) {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const v = b[r*COLS+c]; if (!v) continue;
+      if (c+3<COLS && v===b[r*COLS+c+1] && v===b[r*COLS+c+2] && v===b[r*COLS+c+3]) return v;
+      if (r+3<ROWS && v===b[(r+1)*COLS+c] && v===b[(r+2)*COLS+c] && v===b[(r+3)*COLS+c]) return v;
+      if (r+3<ROWS && c+3<COLS && v===b[(r+1)*COLS+c+1] && v===b[(r+2)*COLS+c+2] && v===b[(r+3)*COLS+c+3]) return v;
+      if (r+3<ROWS && c-3>=0 && v===b[(r+1)*COLS+c-1] && v===b[(r+2)*COLS+c-2] && v===b[(r+3)*COLS+c-3]) return v;
+    }
+  }
+  if (!b.includes(null)) return 'draw';
+  return null;
+}
+function checkWinner() { return checkWinnerBoard(board); }
+
+function updateScores() {
+  document.getElementById('score-1').textContent = `P1: ${scores[0]}`;
+  document.getElementById('score-2').textContent = `P2: ${scores[1]}`;
+}
+
+function showResult() {
+  const text = document.getElementById('result-text');
+  const sub = document.getElementById('result-sub');
+  if (winner === 'draw') { text.textContent = "DRAW!"; sub.textContent = 'TRY AGAIN'; }
+  else if (isMulti) {
+    text.textContent = winner === myPlayer ? '🏆 YOU WIN!' : '💀 YOU LOSE';
+    sub.textContent = `PLAYER ${winner} WINS`;
+  } else {
+    text.textContent = `PLAYER ${winner} WINS!`;
+    sub.textContent = '';
+  }
+  document.getElementById('result-banner').style.display = 'flex';
+}
+
+function reset() {
+  board = Array(ROWS*COLS).fill(null);
+  currentPlayer = 1; winner = null; gameOver = false;
+  document.getElementById('result-banner').style.display = 'none';
+  draw();
+}
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('c4:reset', {}); else reset();
+});
+document.getElementById('play-again-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('c4:reset', {}); else reset();
+});
+
+socketOn('c4:state', state => {
+  board = state.board;
+  currentPlayer = state.currentPlayer;
+  winner = state.winner || null;
+  if (winner) { if (winner !== 'draw') scores[winner-1]++; updateScores(); draw(); setTimeout(showResult,300); }
+  else draw();
+});
+
+function showToast(msg) {
+  const t = document.getElementById('gtoast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+draw();
+</script>
+</body>
+</html>

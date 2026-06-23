@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tic-Tac-Toe</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>
+  canvas { cursor: pointer; }
+  .controls { display:flex; gap:12px; }
+</style>
+</head>
+<body>
+<div class="game-wrap" id="wrap">
+
+  <!-- Waiting Screen -->
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+
+  <!-- Result Banner -->
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">DRAW!</div>
+    <div class="banner-sub" id="result-sub">—</div>
+    <div class="controls">
+      <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+    </div>
+  </div>
+
+  <div class="hud">
+    <div class="hud-title">TIC-TAC-TOE</div>
+    <div class="hud-status" id="turn-label">YOUR TURN</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-x">X: 0</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-o">O: 0</span>
+    </div>
+  </div>
+
+  <canvas id="cvs"></canvas>
+
+  <div class="controls">
+    <button class="btn btn-ghost" id="reset-btn">↺ RESET</button>
+  </div>
+
+  <div class="game-toast" id="gtoast"></div>
+</div>
+
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const SIZE = Math.min(window.innerWidth * 0.85, window.innerHeight * 0.65, 420);
+cvs.width = cvs.height = SIZE;
+const CELL = SIZE / 3;
+const PAD = CELL * 0.2;
+
+let board = Array(9).fill(null);
+let currentPlayer = 'X';
+let winner = null;
+let winLine = null;
+let scores = { X: 0, O: 0 };
+let mySymbol = PLAYER === 0 ? 'X' : (PLAYER === 1 ? 'O' : 'X');
+let isMulti = !IS_SOLO;
+let gameReady = !isMulti || PLAYER === 1; // joiner is always ready
+
+// Show waiting if multiplayer and creator
+// Show waiting ONLY for room creator
+if (isMulti && PLAYER === 0) {
+  document.getElementById('waiting-screen').style.display = 'flex';
+  document.getElementById('room-code-disp').textContent = ROOM || '----';
+}
+
+onRoomReady(() => {
+  document.getElementById('waiting-screen').style.display = 'none';
+  gameReady = true;
+  showToast('OPPONENT JOINED!');
+  draw();
+});
+
+onPlayerLeft(() => showToast('OPPONENT LEFT'));
+
+// Draw grid
+function draw() {
+  ctx.clearRect(0, 0, SIZE, SIZE);
+
+  // Background
+  ctx.fillStyle = '#0a0f1e';
+  ctx.fillRect(0, 0, SIZE, SIZE);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(0,200,255,0.25)';
+  ctx.lineWidth = 2;
+  for (let i = 1; i < 3; i++) {
+    ctx.beginPath();
+    ctx.moveTo(i * CELL, PAD);
+    ctx.lineTo(i * CELL, SIZE - PAD);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(PAD, i * CELL);
+    ctx.lineTo(SIZE - PAD, i * CELL);
+    ctx.stroke();
+  }
+
+  // Pieces
+  board.forEach((val, i) => {
+    if (!val) return;
+    const col = i % 3, row = Math.floor(i / 3);
+    const cx = col * CELL + CELL / 2;
+    const cy = row * CELL + CELL / 2;
+    const r = CELL * 0.32;
+    if (val === 'X') {
+      ctx.strokeStyle = '#00c8ff';
+      ctx.lineWidth = CELL * 0.1;
+      ctx.lineCap = 'round';
+      ctx.shadowColor = '#00c8ff';
+      ctx.shadowBlur = 18;
+      ctx.beginPath();
+      ctx.moveTo(cx - r, cy - r); ctx.lineTo(cx + r, cy + r); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(cx + r, cy - r); ctx.lineTo(cx - r, cy + r); ctx.stroke();
+    } else {
+      ctx.strokeStyle = '#ff6b2b';
+      ctx.lineWidth = CELL * 0.1;
+      ctx.shadowColor = '#ff6b2b';
+      ctx.shadowBlur = 18;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+  });
+
+  // Win line
+  if (winLine) {
+    const [a, , c] = winLine;
+    const ax = (a % 3) * CELL + CELL / 2, ay = Math.floor(a / 3) * CELL + CELL / 2;
+    const cx2 = (c % 3) * CELL + CELL / 2, cy2 = Math.floor(c / 3) * CELL + CELL / 2;
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = CELL * 0.06;
+    ctx.shadowColor = '#ffd700';
+    ctx.shadowBlur = 20;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay); ctx.lineTo(cx2, cy2); ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // Hover hint
+  updateTurnLabel();
+}
+
+function updateTurnLabel() {
+  const label = document.getElementById('turn-label');
+  if (!gameReady) { label.textContent = 'WAITING…'; return; }
+  if (winner) return;
+  if (isMulti) {
+    label.textContent = currentPlayer === mySymbol ? '🟢 YOUR TURN' : '⏳ OPPONENT';
+  } else {
+    label.textContent = `TURN: ${currentPlayer}`;
+  }
+}
+
+cvs.addEventListener('click', e => {
+  if (!gameReady || winner) return;
+  if (isMulti && currentPlayer !== mySymbol) return;
+  const rect = cvs.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (SIZE / rect.width);
+  const y = (e.clientY - rect.top) * (SIZE / rect.height);
+  const col = Math.floor(x / CELL), row = Math.floor(y / CELL);
+  const index = row * 3 + col;
+  if (board[index]) return;
+  if (isMulti) {
+    socketEmit('ttt:move', { index });
+  } else {
+    applyMove(index, currentPlayer);
+  }
+});
+
+function applyMove(index, symbol) {
+  if (board[index] || winner) return;
+  board[index] = symbol;
+  const result = checkWinner(board);
+  if (result) {
+    winner = result.winner;
+    winLine = result.line;
+    if (winner !== 'draw') scores[winner]++;
+    updateScores();
+    draw();
+    showResult();
+  } else {
+    currentPlayer = currentPlayer === 'X' ? 'O' : 'X';
+    draw();
+    if (!isMulti && currentPlayer !== mySymbol) setTimeout(aiMove, 400);
+  }
+}
+
+// Simple AI
+function aiMove() {
+  if (winner) return;
+  const empty = board.map((v,i)=>v?null:i).filter(v=>v!==null);
+  // Try to win or block
+  for (const sym of ['O','X']) {
+    for (const idx of empty) {
+      const test = [...board]; test[idx] = sym;
+      if (checkWinner(test)?.winner === sym) {
+        if (sym === 'O') { applyMove(idx, 'O'); return; }
+        if (sym === 'X') { applyMove(idx, 'O'); return; }
+      }
+    }
+  }
+  // Center, then random
+  if (!board[4]) { applyMove(4, 'O'); return; }
+  const idx = empty[Math.floor(Math.random() * empty.length)];
+  applyMove(idx, 'O');
+}
+
+function checkWinner(b) {
+  const lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+  for (const [a,bv,c] of lines) {
+    if (b[a] && b[a] === b[bv] && b[a] === b[c]) return { winner: b[a], line: [a,bv,c] };
+  }
+  if (!b.includes(null)) return { winner: 'draw', line: null };
+  return null;
+}
+
+function showResult() {
+  const banner = document.getElementById('result-banner');
+  const text = document.getElementById('result-text');
+  const sub = document.getElementById('result-sub');
+  if (winner === 'draw') {
+    text.textContent = "IT'S A DRAW!";
+    sub.textContent = 'WELL PLAYED';
+  } else if (isMulti) {
+    text.textContent = winner === mySymbol ? '🏆 YOU WIN!' : '💀 YOU LOSE';
+    sub.textContent = `PLAYER ${winner} WINS`;
+  } else {
+    text.textContent = `${winner} WINS!`;
+    sub.textContent = '';
+  }
+  banner.style.display = 'flex';
+}
+
+function updateScores() {
+  document.getElementById('score-x').textContent = `X: ${scores.X}`;
+  document.getElementById('score-o').textContent = `O: ${scores.O}`;
+}
+
+function reset() {
+  board = Array(9).fill(null);
+  currentPlayer = 'X';
+  winner = null;
+  winLine = null;
+  gameOver = false;
+  document.getElementById('result-banner').style.display = 'none';
+  draw();
+}
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('ttt:reset', {});
+  else reset();
+});
+
+document.getElementById('play-again-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('ttt:reset', {});
+  else reset();
+});
+
+// Multiplayer state sync
+socketOn('ttt:state', state => {
+  board = state.board;
+  currentPlayer = state.currentPlayer;
+  winner = state.winner || null;
+  winLine = state.winLine || null;
+  if (winner) {
+    if (winner !== 'draw') scores[winner]++;
+    updateScores();
+    draw();
+    showResult();
+  } else {
+    draw();
+  }
+});
+
+function showToast(msg) {
+  const t = document.getElementById('gtoast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+draw();
+</script>
+</body>
+</html>

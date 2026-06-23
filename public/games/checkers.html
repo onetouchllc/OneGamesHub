@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Checkers</title>
+<link rel="stylesheet" href="/css/game.css">
+<style>canvas { cursor: pointer; }</style>
+</head>
+<body>
+<div class="game-wrap">
+  <div class="banner" id="waiting-screen" style="display:none">
+    <div class="waiting-screen">
+      <div class="banner-sub">SHARE ROOM CODE</div>
+      <div class="waiting-code" id="room-code-disp">----</div>
+      <div class="spinner"></div>
+      <div class="banner-sub">WAITING FOR OPPONENT…</div>
+    </div>
+  </div>
+  <div class="banner" id="result-banner" style="display:none">
+    <div class="banner-title" id="result-text">WIN!</div>
+    <button class="btn btn-cyan" id="play-again-btn">PLAY AGAIN</button>
+  </div>
+  <div class="hud">
+    <div class="hud-title">CHECKERS</div>
+    <div class="hud-status" id="turn-label">—</div>
+    <div class="hud-score">
+      <span class="score-p1" id="score-b">🔵 12</span>
+      &nbsp;|&nbsp;
+      <span class="score-p2" id="score-r">🔴 12</span>
+    </div>
+  </div>
+  <canvas id="cvs"></canvas>
+  <button class="btn btn-ghost" style="margin-top:4px" id="reset-btn">↺ RESET</button>
+  <div class="game-toast" id="gtoast"></div>
+</div>
+<script src="/js/socket-bridge.js"></script>
+<script>
+// ── Multiplayer readiness fix ──────────────────────────────────────────
+// Joiner (PLAYER===1) comes in after room:ready already fired on server.
+// We mark them ready immediately and rely on room:resync from server.
+if (isMulti && PLAYER === 1) {
+  gameReady = true;
+  const ws = document.getElementById('waiting-screen');
+  if (ws) ws.style.display = 'none';
+}
+// Signal parent iframe is ready (flushes any queued messages)
+window.parent.postMessage({ type: 'iframe:ready' }, '*');
+</script>
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const SZ = 8;
+const CELL = Math.min(Math.floor((window.innerWidth-40)/SZ), Math.floor((window.innerHeight-220)/SZ), 72);
+cvs.width = cvs.height = SZ * CELL;
+
+// Pieces: 1=blue, 2=red, 11=blue-king, 22=red-king
+let board = initBoard();
+let selected = null;
+let validMoves = [];
+let turn = 1; // 1=blue(top→bottom), 2=red(bottom→top)
+let gameOver = false;
+let isMulti = !IS_SOLO;
+let gameReady = !isMulti || PLAYER === 1; // joiner is always ready
+let myTeam = PLAYER === 0 ? 1 : (PLAYER === 1 ? 2 : 1);
+
+if (isMulti && PLAYER === 0) {
+  document.getElementById('waiting-screen').style.display = 'flex';
+  document.getElementById('room-code-disp').textContent = ROOM || '----';
+}
+onRoomReady(() => {
+  document.getElementById('waiting-screen').style.display = 'none';
+  gameReady = true;
+  showToast(myTeam === 1 ? 'YOU ARE BLUE' : 'YOU ARE RED');
+  draw();
+});
+onPlayerLeft(() => showToast('OPPONENT LEFT'));
+
+function initBoard() {
+  const b = Array(64).fill(0);
+  for (let r = 0; r < 3; r++)
+    for (let c = 0; c < SZ; c++)
+      if ((r+c)%2===1) b[r*SZ+c] = 1;
+  for (let r = 5; r < SZ; r++)
+    for (let c = 0; c < SZ; c++)
+      if ((r+c)%2===1) b[r*SZ+c] = 2;
+  return b;
+}
+
+function getMovesForPiece(b, r, c) {
+  const piece = b[r*SZ+c];
+  if (!piece) return [];
+  const team = piece > 10 ? piece-10 : piece;
+  const isKing = piece > 10;
+  const dirs = [];
+  if (team === 1 || isKing) dirs.push([1,1],[1,-1]);
+  if (team === 2 || isKing) dirs.push([-1,1],[-1,-1]);
+  const moves = [], jumps = [];
+  for (const [dr,dc] of dirs) {
+    const nr = r+dr, nc = c+dc;
+    if (nr>=0&&nr<SZ&&nc>=0&&nc<SZ) {
+      if (!b[nr*SZ+nc]) moves.push({fr:r,fc:c,tr:nr,tc:nc,jump:false});
+      else {
+        const enemy = b[nr*SZ+nc];
+        const et = enemy>10?enemy-10:enemy;
+        if (et && et!==team) {
+          const jr=nr+dr, jc=nc+dc;
+          if (jr>=0&&jr<SZ&&jc>=0&&jc<SZ&&!b[jr*SZ+jc])
+            jumps.push({fr:r,fc:c,tr:jr,tc:jc,cap:{r:nr,c:nc},jump:true});
+        }
+      }
+    }
+  }
+  return jumps.length ? jumps : moves;
+}
+
+function getAllMoves(b, team) {
+  const all = [];
+  for (let r=0;r<SZ;r++) for(let c=0;c<SZ;c++) {
+    const p = b[r*SZ+c];
+    if (p && (p===team||p===team+10)) all.push(...getMovesForPiece(b,r,c));
+  }
+  // Forced jumps
+  const jumps = all.filter(m=>m.jump);
+  return jumps.length ? jumps : all;
+}
+
+function applyMove(b, move) {
+  const nb = [...b];
+  nb[move.tr*SZ+move.tc] = nb[move.fr*SZ+move.fc];
+  nb[move.fr*SZ+move.fc] = 0;
+  if (move.cap) nb[move.cap.r*SZ+move.cap.c] = 0;
+  // King promotion
+  const team = nb[move.tr*SZ+move.tc] > 10 ? nb[move.tr*SZ+move.tc]-10 : nb[move.tr*SZ+move.tc];
+  if (team===1 && move.tr===7) nb[move.tr*SZ+move.tc] = 11;
+  if (team===2 && move.tr===0) nb[move.tr*SZ+move.tc] = 22;
+  return nb;
+}
+
+cvs.addEventListener('click', e => {
+  if (!gameReady || gameOver) return;
+  if (isMulti && turn !== myTeam) return;
+  const rect = cvs.getBoundingClientRect();
+  const c = Math.floor((e.clientX-rect.left)/(rect.width/SZ));
+  const r = Math.floor((e.clientY-rect.top)/(rect.height/SZ));
+  handleClick(r, c);
+});
+
+function handleClick(r, c) {
+  const piece = board[r*SZ+c];
+  const myPiece = piece && (piece===turn||piece===turn+10);
+
+  if (myPiece) {
+    selected = {r,c};
+    const allMoves = getAllMoves(board, turn);
+    validMoves = allMoves.filter(m => m.fr===r && m.fc===c);
+    draw(); return;
+  }
+
+  if (selected) {
+    const move = validMoves.find(m => m.tr===r && m.tc===c);
+    if (move) {
+      if (isMulti) {
+        socketEmit('game:action', { type:'checkers:move', move });
+      } else {
+        executeMove(move);
+      }
+    }
+    selected = null; validMoves = []; draw();
+  }
+}
+
+function executeMove(move) {
+  board = applyMove(board, move);
+  // Check extra jumps
+  if (move.jump) {
+    const extra = getMovesForPiece(board, move.tr, move.tc).filter(m=>m.jump);
+    if (extra.length) {
+      selected = {r:move.tr, c:move.tc};
+      validMoves = extra;
+      draw(); return;
+    }
+  }
+  selected = null; validMoves = [];
+  const opp = turn===1?2:1;
+  const oppMoves = getAllMoves(board, opp);
+  if (!oppMoves.length) {
+    gameOver = true;
+    setTimeout(() => {
+      document.getElementById('result-text').textContent = isMulti
+        ? (turn===myTeam?'🏆 YOU WIN!':'💀 YOU LOSE') : `PLAYER ${turn} WINS!`;
+      document.getElementById('result-banner').style.display = 'flex';
+    }, 200);
+  } else {
+    turn = opp;
+  }
+  updateCounts();
+  draw();
+  if (!isMulti && turn === 2) setTimeout(aiMove, 400);
+}
+
+function aiMove() {
+  if (gameOver) return;
+  const moves = getAllMoves(board, 2);
+  if (!moves.length) return;
+  // Simple: prefer jumps, else random
+  const move = moves[Math.floor(Math.random()*moves.length)];
+  executeMove(move);
+}
+
+socketOn('game:action', data => {
+  if (data.type !== 'checkers:move') return;
+  if (data.playerIndex === PLAYER) return;
+  executeMove(data.move);
+});
+
+function updateCounts() {
+  let b=0,r=0;
+  board.forEach(p=>{if(p===1||p===11)b++;if(p===2||p===22)r++;});
+  document.getElementById('score-b').textContent = `🔵 ${b}`;
+  document.getElementById('score-r').textContent = `🔴 ${r}`;
+  const lbl = document.getElementById('turn-label');
+  if (!gameReady) { lbl.textContent='WAITING…'; return; }
+  if (isMulti) lbl.textContent = turn===myTeam ? '🟢 YOUR TURN' : '⏳ OPPONENT';
+  else lbl.textContent = `TURN: ${turn===1?'BLUE':'RED'}`;
+}
+
+function draw() {
+  ctx.clearRect(0,0,cvs.width,cvs.height);
+  for (let r=0;r<SZ;r++) for (let c=0;c<SZ;c++) {
+    ctx.fillStyle = (r+c)%2===0 ? '#1a1f35' : '#0d1020';
+    ctx.fillRect(c*CELL,r*CELL,CELL,CELL);
+  }
+  // Highlights
+  if (selected) {
+    const {r,c} = selected;
+    ctx.fillStyle = 'rgba(0,200,255,0.2)';
+    ctx.fillRect(c*CELL,r*CELL,CELL,CELL);
+    validMoves.forEach(m => {
+      ctx.fillStyle = 'rgba(0,255,136,0.2)';
+      ctx.fillRect(m.tc*CELL,m.tr*CELL,CELL,CELL);
+      ctx.strokeStyle = 'rgba(0,255,136,0.5)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(m.tc*CELL+1,m.tr*CELL+1,CELL-2,CELL-2);
+    });
+  }
+  // Pieces
+  for (let r=0;r<SZ;r++) for (let c=0;c<SZ;c++) {
+    const p = board[r*SZ+c];
+    if (!p) continue;
+    const team = p>10?p-10:p;
+    const king = p>10;
+    const cx = c*CELL+CELL/2, cy = r*CELL+CELL/2, rad = CELL*0.38;
+    const color = team===1?'#00c8ff':'#ff3a5c';
+    ctx.shadowColor = color; ctx.shadowBlur = 14;
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.beginPath(); ctx.arc(cx+2,cy+2,rad,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.fill();
+    // Shine
+    ctx.fillStyle = 'rgba(255,255,255,0.2)';
+    ctx.beginPath(); ctx.arc(cx-rad*0.3,cy-rad*0.3,rad*0.35,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur = 0;
+    if (king) {
+      ctx.fillStyle = '#ffd700';
+      ctx.font = `bold ${CELL*0.38}px Arial`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('♔',cx,cy);
+    }
+  }
+  updateCounts();
+}
+
+function reset() {
+  board = initBoard(); selected=null; validMoves=[]; turn=1; gameOver=false; winner=null;
+  document.getElementById('result-banner').style.display='none';
+  draw();
+}
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('game:action',{type:'checkers:reset'});
+  else reset();
+});
+document.getElementById('play-again-btn').addEventListener('click', () => {
+  if (isMulti) socketEmit('game:action',{type:'checkers:reset'});
+  else reset();
+});
+socketOn('game:action', data => {
+  if (data.type==='checkers:reset') reset();
+});
+
+function showToast(msg) {
+  const t=document.getElementById('gtoast');
+  t.textContent=msg; t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2500);
+}
+draw();
+</script>
+</body>
+</html>
